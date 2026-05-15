@@ -47,6 +47,13 @@ function toUserDocId(displayName) {
   return displayName.trim().toLowerCase()
 }
 
+/** Per-group profile id — same display name in different groups = different documents. */
+function toUserDocumentId(displayName, groupId) {
+  const g = normalizeGroupCode(groupId).replace(/[/:]/g, '-')
+  const n = toUserDocId(displayName).replace(/[/:]/g, '-')
+  return `${g}::${n}`
+}
+
 function formatLocalYMD(d) {
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
@@ -321,7 +328,7 @@ function WelcomeScreen({
         </form>
 
         <p className="mt-10 text-center text-[11px] leading-relaxed text-slate-600">
-          Name is your Firestore ID (lowercase). Leave the group anytime from the dashboard.
+          Name + group together make your profile id. Leave the group anytime from the dashboard.
         </p>
       </div>
     </div>
@@ -659,7 +666,7 @@ async function ensureUserDocument(displayName, groupIdNorm) {
   const gid = groupIdNorm ? normalizeGroupCode(groupIdNorm) : ''
   if (!gid) throw new Error('Missing groupId')
 
-  const userId = toUserDocId(name)
+  const userId = toUserDocumentId(name, gid)
   const ref = doc(db, 'users', userId)
   const snap = await getDoc(ref)
   if (!snap.exists()) {
@@ -715,7 +722,7 @@ function App() {
   const [fixDraft, setFixDraft] = useState('0')
   const [fixSaving, setFixSaving] = useState(false)
 
-  const userDocId = username.trim() ? toUserDocId(username) : ''
+  const userDocId = username.trim() && groupId ? toUserDocumentId(username, groupId) : ''
 
   const rankedFriends = useMemo(() => {
     return [...leaderboardRows].sort(
@@ -860,7 +867,7 @@ function App() {
           : normalizedGroupId
       setGroupDisplayName(squadLabel)
 
-      const userId = toUserDocId(name)
+      const userId = toUserDocumentId(name, normalizedGroupId)
       const ref = doc(db, 'users', userId)
       const snap = await getDoc(ref)
       if (!snap.exists()) {

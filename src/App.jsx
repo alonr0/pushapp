@@ -14,24 +14,33 @@ import {
   getDoc,
   increment,
   onSnapshot,
+  query,
   runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
+  where,
 } from 'firebase/firestore'
 import { db } from './firebase'
 
 const DEFAULT_DAILY_GOAL = 50
-const INVITE_CODE = import.meta.env.VITE_APP_INVITE_CODE ?? ''
 const USERNAME_STORAGE_KEY = 'username'
+const GROUP_ID_STORAGE_KEY = 'pushapp_groupId'
 const EMPTY_HISTORY = []
 
-function readStoredUsername() {
+function readStoredSession() {
   try {
-    return localStorage.getItem(USERNAME_STORAGE_KEY)?.trim() ?? ''
+    const username = localStorage.getItem(USERNAME_STORAGE_KEY)?.trim() ?? ''
+    const rawGroup = localStorage.getItem(GROUP_ID_STORAGE_KEY)?.trim() ?? ''
+    const groupId = rawGroup ? normalizeGroupCode(rawGroup) : ''
+    return { username, groupId }
   } catch {
-    return ''
+    return { username: '', groupId: '' }
   }
+}
+
+function normalizeGroupCode(code) {
+  return code.trim().toLowerCase()
 }
 
 function toUserDocId(displayName) {
@@ -645,14 +654,18 @@ const NAV = [
   { id: 'leaderboard', label: 'Leaderboard', Icon: NavIconTrophy },
 ]
 
-async function ensureUserDocument(displayName) {
+async function ensureUserDocument(displayName, groupIdNorm) {
   const name = displayName.trim()
+  const gid = groupIdNorm ? normalizeGroupCode(groupIdNorm) : ''
+  if (!gid) throw new Error('Missing groupId')
+
   const userId = toUserDocId(name)
   const ref = doc(db, 'users', userId)
   const snap = await getDoc(ref)
   if (!snap.exists()) {
     await setDoc(ref, {
       name,
+      groupId: gid,
       dailyCount: 0,
       totalCount: 0,
       dailyGoal: DEFAULT_DAILY_GOAL,
@@ -664,6 +677,7 @@ async function ensureUserDocument(displayName) {
     const patch = {}
     if (d.dailyGoal === undefined || d.dailyGoal === null) patch.dailyGoal = DEFAULT_DAILY_GOAL
     if (!Array.isArray(d.history)) patch.history = []
+    if (d.groupId !== gid) patch.groupId = gid
     if (Object.keys(patch).length > 0) {
       await updateDoc(ref, patch)
     }
@@ -671,9 +685,13 @@ async function ensureUserDocument(displayName) {
 }
 
 function App() {
-  const initialUsername = readStoredUsername()
-  const [username, setUsername] = useState(initialUsername)
-  const [isAuthenticated, setIsAuthenticated] = useState(Boolean(initialUsername))
+  const initialSession = readStoredSession()
+  const [username, setUsername] = useState(initialSession.username)
+  const [groupId, setGroupId] = useState(initialSession.groupId)
+  const [groupDisplayName, setGroupDisplayName] = useState('')
+  const [isAuthenticated, setIsAuthenticated] = useState(
+    Boolean(initialSession.username && initialSession.groupId),
+  )
 
   const [welcomeName, setWelcomeName] = useState('')
   const [welcomeInvite, setWelcomeInvite] = useState('')
@@ -728,12 +746,12 @@ function App() {
   const pctBar = Math.min((todayCount / Math.max(myDailyGoal, 1)) * 100, 100)
 
   useEffect(() => {
-    if (!isAuthenticated || !username.trim()) return undefined
+    if (!isAuthenticated || !username.trim() || !groupId) return undefined
 
     let alive = true
     ;(async () => {
       try {
-        await ensureUserDocument(username)
+        await ensureUserDocument(username, groupId)
       } catch (e) {
         console.error(e)
         if (alive) setSyncError('Could not sync your profile. Check Firestore rules.')
@@ -743,10 +761,10 @@ function App() {
     return () => {
       alive = false
     }
-  }, [isAuthenticated, username])
+  }, [isAuthenticated, username, groupId])
 
   useEffect(() => {
-    if (!isAuthenticated || !userDocId) return undefined
+    if (!isAuthenticated || !userDocId || !groupId) return undefined
 
     let cancelled = false
     ;(async () => {
@@ -763,14 +781,34 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [isAuthenticated, userDocId, activeTab])
+  }, [isAuthenticated, userDocId, groupId, activeTab])
 
   useEffect(() => {
-    if (!isAuthenticated || !userDocId) return undefined
+    if (!isAuthenticated || !groupId) return undefined
 
-    const usersCol = collection(db, 'users')
+    const gRef = doc(db, 'groups', groupId)
     const unsub = onSnapshot(
-      usersCol,
+      gRef,
+      (snap) => {
+        const raw = snap.data()?.groupName
+        const label = typeof raw === 'string' && raw.trim() ? raw.trim() : groupId
+        setGroupDisplayName(label)
+      },
+      (err) => {
+        console.error(err)
+        setGroupDisplayName(groupId)
+      },
+    )
+
+    return () => unsub()
+  }, [isAuthenticated, groupId])
+
+  useEffect(() => {
+    if (!isAuthenticated || !userDocId || !groupId) return undefined
+
+    const usersQuery = query(collection(db, 'users'), where('groupId', '==', groupId))
+    const unsub = onSnapshot(
+      usersQuery,
       (snapshot) => {
         const next = snapshot.docs.map((d) => {
           const data = d.data()
@@ -796,41 +834,58 @@ function App() {
     )
 
     return () => unsub()
-  }, [isAuthenticated, userDocId])
+  }, [isAuthenticated, userDocId, groupId])
 
   const handleJoinCrew = async () => {
     setWelcomeError('')
     const name = welcomeName.trim()
-    if (!name || !welcomeInvite.trim()) return
+    const rawCode = welcomeInvite.trim()
+    if (!name || !rawCode) return
 
-    if (welcomeInvite.trim() !== String(INVITE_CODE).trim()) {
-      setWelcomeError('Invalid invite code. Ask your group admin.')
-      return
-    }
+    const normalizedGroupId = normalizeGroupCode(rawCode)
 
     setIsJoining(true)
     try {
+      const groupRef = doc(db, 'groups', normalizedGroupId)
+      const groupSnap = await getDoc(groupRef)
+      if (!groupSnap.exists()) {
+        setWelcomeError('Group code not found. Ask the developer for a valid key!')
+        return
+      }
+
+      const groupNameRaw = groupSnap.data()?.groupName
+      const squadLabel =
+        typeof groupNameRaw === 'string' && groupNameRaw.trim()
+          ? groupNameRaw.trim()
+          : normalizedGroupId
+      setGroupDisplayName(squadLabel)
+
       const userId = toUserDocId(name)
       const ref = doc(db, 'users', userId)
       const snap = await getDoc(ref)
       if (!snap.exists()) {
         await setDoc(ref, {
           name,
+          groupId: normalizedGroupId,
           dailyCount: 0,
           totalCount: 0,
           dailyGoal: DEFAULT_DAILY_GOAL,
           history: [],
           lastUpdated: serverTimestamp(),
         })
+      } else {
+        await updateDoc(ref, { groupId: normalizedGroupId, name })
       }
 
       try {
         localStorage.setItem(USERNAME_STORAGE_KEY, name)
+        localStorage.setItem(GROUP_ID_STORAGE_KEY, normalizedGroupId)
       } catch {
         setWelcomeError('Could not save on this device. Check browser storage settings.')
         return
       }
 
+      setGroupId(normalizedGroupId)
       setUsername(name)
       setIsAuthenticated(true)
       setWelcomeName('')
@@ -846,10 +901,13 @@ function App() {
   const handleLeaveGroup = () => {
     try {
       localStorage.removeItem(USERNAME_STORAGE_KEY)
+      localStorage.removeItem(GROUP_ID_STORAGE_KEY)
     } catch {
       /* ignore */
     }
     setUsername('')
+    setGroupId('')
+    setGroupDisplayName('')
     setIsAuthenticated(false)
     setActiveTab('dashboard')
     setWelcomeName('')
@@ -981,6 +1039,9 @@ function App() {
           <div className="min-w-0 flex-1">
             <h1 className="text-lg font-semibold tracking-tight text-white">PushApp</h1>
             <p className="mt-0.5 truncate text-sm font-medium text-emerald-400/95">{username}</p>
+            <p className="truncate text-xs font-semibold tracking-tight text-blue-400/90">
+              {groupDisplayName || '\u00A0'}
+            </p>
             <p className="text-xs text-slate-500">
               {activeTab === 'history' ? 'Your training log' : 'Today · live with your crew'}
             </p>

@@ -1,0 +1,1352 @@
+import { useEffect, useMemo, useState } from 'react'
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
+import {
+  collection,
+  doc,
+  getDoc,
+  increment,
+  onSnapshot,
+  runTransaction,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore'
+import { db } from './firebase'
+
+const DEFAULT_DAILY_GOAL = 50
+const INVITE_CODE = import.meta.env.VITE_APP_INVITE_CODE ?? ''
+const USERNAME_STORAGE_KEY = 'username'
+const EMPTY_HISTORY = []
+
+function readStoredUsername() {
+  try {
+    return localStorage.getItem(USERNAME_STORAGE_KEY)?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function toUserDocId(displayName) {
+  return displayName.trim().toLowerCase()
+}
+
+function formatLocalYMD(d) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function lastUpdatedToDate(ts) {
+  if (!ts) return null
+  if (typeof ts.toDate === 'function') return ts.toDate()
+  if (ts instanceof Date) return ts
+  return null
+}
+
+function isSameLocalCalendarDay(a, b) {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  )
+}
+
+function getDailyGoal(data) {
+  const g = Number(data?.dailyGoal)
+  if (Number.isFinite(g) && g > 0) return Math.min(Math.floor(g), 99_999)
+  return DEFAULT_DAILY_GOAL
+}
+
+function normalizeHistoryEntry(e) {
+  if (!e || typeof e.date !== 'string') return null
+  const count = Math.max(0, Math.floor(Number(e.count) || 0))
+  const goalAtDayEnd = Number(e.goalAtDayEnd)
+  const goalMet =
+    typeof e.goalMet === 'boolean'
+      ? e.goalMet
+      : Number.isFinite(goalAtDayEnd) && goalAtDayEnd > 0
+        ? count >= goalAtDayEnd
+        : count >= DEFAULT_DAILY_GOAL
+  return {
+    date: e.date,
+    count,
+    goalMet,
+    goalAtDayEnd: Number.isFinite(goalAtDayEnd) && goalAtDayEnd > 0 ? goalAtDayEnd : undefined,
+  }
+}
+
+function parseHistoryFromFirestore(h) {
+  if (!Array.isArray(h)) return []
+  return h.map(normalizeHistoryEntry).filter(Boolean)
+}
+
+function sortHistoryChronological(history) {
+  return [...history].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+}
+
+function ymdToChartLabel(ymd) {
+  const parts = ymd.split('-').map((x) => Number.parseInt(x, 10))
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return ymd
+  const [y, m, d] = parts
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+function computeDayStreaks(sortedAsc) {
+  let totalGoalDays = 0
+  for (const e of sortedAsc) {
+    if (e.goalMet) totalGoalDays++
+  }
+  let currentStreak = 0
+  for (let i = sortedAsc.length - 1; i >= 0; i--) {
+    if (sortedAsc[i].goalMet) currentStreak++
+    else break
+  }
+  return { currentStreak, totalGoalDays }
+}
+
+/**
+ * Dev-only: synthetic past days for Analytics preview (no Firestore writes).
+ * Disabled in production builds. Real history entries override the same date.
+ */
+function buildDevPlaceholderHistory() {
+  const goal = DEFAULT_DAILY_GOAL
+  const counts = [38, 52, 44, 61, 47, 55, 58, 50, 42]
+  const out = []
+  for (let i = 0; i < counts.length; i++) {
+    const d = new Date()
+    d.setHours(12, 0, 0, 0)
+    const daysAgo = counts.length - i
+    d.setDate(d.getDate() - daysAgo)
+    const c = counts[i]
+    out.push({
+      date: formatLocalYMD(d),
+      count: c,
+      goalMet: c >= goal,
+      goalAtDayEnd: goal,
+    })
+  }
+  return out
+}
+
+function mergeHistoryWithDevPlaceholders(realHistory) {
+  if (!import.meta.env.DEV) return realHistory
+  const placeholders = buildDevPlaceholderHistory()
+  const byDate = new Map()
+  for (const e of placeholders) byDate.set(e.date, { ...e })
+  for (const e of realHistory) byDate.set(e.date, e)
+  return sortHistoryChronological([...byDate.values()])
+}
+
+function devPreviewTotalCount(firestoreTotal, realHistory) {
+  if (!import.meta.env.DEV) return firestoreTotal
+  const realDates = new Set(realHistory.map((e) => e.date))
+  const boost = buildDevPlaceholderHistory()
+    .filter((e) => !realDates.has(e.date))
+    .reduce((s, e) => s + e.count, 0)
+  return firestoreTotal + boost
+}
+
+/** Stored dailyCount only counts for "today" in the user's local calendar. */
+function effectiveDailyCount(data) {
+  const raw = Number(data?.dailyCount) || 0
+  const last = lastUpdatedToDate(data?.lastUpdated)
+  if (!last) return raw
+  const now = new Date()
+  if (!isSameLocalCalendarDay(last, now)) return 0
+  return raw
+}
+
+/**
+ * Archives previous calendar day when lastUpdated is not today and dailyCount > 0.
+ */
+async function applyLazyMidnightResetIfNeeded(userId) {
+  const ref = doc(db, 'users', userId)
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(ref)
+    if (!snap.exists()) return
+
+    const data = snap.data()
+    const last = lastUpdatedToDate(data.lastUpdated)
+    const now = new Date()
+    if (!last || isSameLocalCalendarDay(last, now)) return
+
+    const daily = Math.max(0, Math.floor(Number(data.dailyCount) || 0))
+    const goal = getDailyGoal(data)
+    const history = parseHistoryFromFirestore(data.history)
+    const archivedDate = formatLocalYMD(last)
+
+    if (daily > 0) {
+      const entry = {
+        date: archivedDate,
+        count: daily,
+        goalMet: daily >= goal,
+        goalAtDayEnd: goal,
+      }
+      transaction.update(ref, {
+        dailyCount: 0,
+        history: [...history, entry],
+        lastUpdated: serverTimestamp(),
+      })
+    } else {
+      transaction.update(ref, {
+        lastUpdated: serverTimestamp(),
+      })
+    }
+  })
+}
+
+function getInitials(name) {
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return '?'
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+}
+
+const welcomeInputClass =
+  'w-full rounded-2xl border border-slate-800 bg-slate-900/90 px-4 py-3.5 text-[15px] text-white placeholder:text-slate-600 transition focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/40'
+
+const panelInputClass =
+  'w-full rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-base text-white placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30'
+
+function WelcomeScreen({
+  nameInput,
+  setNameInput,
+  inviteInput,
+  setInviteInput,
+  onJoin,
+  welcomeError,
+  isJoining,
+}) {
+  return (
+    <div className="relative min-h-dvh overflow-hidden bg-slate-950 font-sans text-slate-100 antialiased">
+      <div
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_70%_45%_at_50%_-15%,rgba(16,185,129,0.12),transparent_55%)]"
+        aria-hidden
+      />
+      <div
+        className="pointer-events-none absolute bottom-0 left-1/2 h-[42vh] w-[140%] -translate-x-1/2 bg-[radial-gradient(ellipse_at_center,rgba(59,130,246,0.06),transparent_70%)]"
+        aria-hidden
+      />
+
+      <div className="relative mx-auto flex min-h-dvh max-w-md flex-col justify-center px-5 py-12 pt-[max(3rem,env(safe-area-inset-top))] pb-[max(3rem,env(safe-area-inset-bottom))]">
+        <div className="mb-10">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-emerald-400/80">
+            PushApp
+          </p>
+          <h1 className="mt-3 text-4xl font-bold tracking-tight text-white">Join your crew</h1>
+          <p className="mt-3 text-[15px] leading-relaxed text-slate-500">
+            Two taps. No passwords. Your stats sync live with the group.
+          </p>
+        </div>
+
+        <form
+          className="space-y-5"
+          onSubmit={(e) => {
+            e.preventDefault()
+            onJoin()
+          }}
+        >
+          {welcomeError && (
+            <div
+              className="rounded-2xl border border-red-500/35 bg-red-950/35 px-4 py-3 text-[13px] leading-snug text-red-200/95"
+              role="alert"
+              aria-live="polite"
+            >
+              {welcomeError}
+            </div>
+          )}
+
+          <div>
+            <label htmlFor="welcome-name" className="mb-2 block text-xs font-medium text-slate-400">
+              Your name
+            </label>
+            <input
+              id="welcome-name"
+              name="username"
+              type="text"
+              autoComplete="nickname"
+              value={nameInput}
+              onChange={(e) => setNameInput(e.target.value)}
+              className={welcomeInputClass}
+              placeholder="Alex"
+              required
+              disabled={isJoining}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="welcome-invite" className="mb-2 block text-xs font-medium text-slate-400">
+              Group invite code
+            </label>
+            <input
+              id="welcome-invite"
+              name="invite"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              value={inviteInput}
+              onChange={(e) => setInviteInput(e.target.value)}
+              className={welcomeInputClass}
+              placeholder="••••••••"
+              required
+              disabled={isJoining}
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={isJoining}
+            className="w-full rounded-2xl bg-emerald-500 py-4 text-[15px] font-semibold tracking-wide text-slate-950 shadow-[0_0_32px_-4px_rgba(16,185,129,0.45)] transition hover:bg-emerald-400 active:scale-[0.99] focus-visible:outline focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 disabled:pointer-events-none disabled:opacity-60"
+          >
+            {isJoining ? 'Joining…' : 'Join the Crew'}
+          </button>
+        </form>
+
+        <p className="mt-10 text-center text-[11px] leading-relaxed text-slate-600">
+          Name is your Firestore ID (lowercase). Leave the group anytime from the dashboard.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function ProgressRing({ current, goal }) {
+  const safeGoal = Math.max(goal, 1)
+  const pct = Math.min(current / safeGoal, 1)
+  const radius = 44
+  const circumference = 2 * Math.PI * radius
+  const dashOffset = circumference * (1 - pct)
+
+  return (
+    <div className="relative flex h-40 w-40 shrink-0 items-center justify-center">
+      <svg className="h-full w-full -rotate-90" viewBox="0 0 100 100" aria-hidden>
+        <circle
+          cx="50"
+          cy="50"
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="8"
+          className="text-slate-800"
+        />
+        <circle
+          cx="50"
+          cy="50"
+          r={radius}
+          fill="none"
+          stroke="url(#ringGradientDash)"
+          strokeWidth="8"
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          className="transition-[stroke-dashoffset] duration-500 ease-out"
+        />
+        <defs>
+          <linearGradient id="ringGradientDash" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#34d399" />
+            <stop offset="100%" stopColor="#3b82f6" />
+          </linearGradient>
+        </defs>
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+        <span className="text-3xl font-bold tabular-nums tracking-tight text-white">
+          {current}
+        </span>
+        <span className="text-xs font-medium text-slate-500">/ {goal} goal</span>
+      </div>
+    </div>
+  )
+}
+
+function IconPencil({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125"
+      />
+    </svg>
+  )
+}
+
+function IconCheckBadge({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.75} stroke="currentColor" aria-hidden>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
+      />
+    </svg>
+  )
+}
+
+function MicroModal({ title, description, children, onClose }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/75 p-4 pt-12 backdrop-blur-sm sm:items-center"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="micro-modal-title"
+    >
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        aria-label="Close dialog overlay"
+        onClick={onClose}
+      />
+      <div className="relative z-10 w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-2xl shadow-emerald-950/30">
+        <h3 id="micro-modal-title" className="text-base font-semibold text-white">
+          {title}
+        </h3>
+        {description && <p className="mt-2 text-sm text-slate-500">{description}</p>}
+        <div className="mt-4">{children}</div>
+      </div>
+    </div>
+  )
+}
+
+function HistoryTimeRail({ history, currentGoal }) {
+  const sorted = useMemo(() => {
+    return [...history].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+  }, [history])
+
+  if (sorted.length === 0) {
+    return (
+      <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 py-14 text-center">
+        <p className="text-sm text-slate-500">No completed days yet.</p>
+        <p className="mt-2 text-xs text-slate-600">After midnight, yesterday rolls in here automatically.</p>
+      </div>
+    )
+  }
+
+  return (
+    <ul className="relative space-y-0 pr-1 pl-2">
+      <div className="absolute bottom-6 left-[0.6rem] top-6 w-px bg-gradient-to-b from-emerald-500/50 via-slate-700/90 to-transparent" aria-hidden />
+      {sorted.map((row, i) => {
+        const met =
+          typeof row.goalMet === 'boolean'
+            ? row.goalMet
+            : row.goalAtDayEnd != null
+              ? row.count >= row.goalAtDayEnd
+              : row.count >= currentGoal
+        return (
+          <li key={`${row.date}-${i}`} className="relative flex gap-4 py-3 pl-6">
+            <span
+              className={`absolute left-0 top-1/2 flex h-3 w-3 -translate-y-1/2 rounded-full ring-4 ring-slate-950 ${
+                met ? 'bg-emerald-400' : 'bg-slate-600'
+              }`}
+              aria-hidden
+            />
+            <div className="min-w-0 flex-1 rounded-xl border border-slate-800/90 bg-slate-800/35 px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-medium text-white">{row.date}</p>
+                {met ? (
+                  <span className="flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-300">
+                    <IconCheckBadge className="h-4 w-4" />
+                    Goal
+                  </span>
+                ) : (
+                  <span className="shrink-0 rounded-full border border-slate-700 bg-slate-800/80 px-2.5 py-0.5 text-[11px] font-medium text-slate-500">
+                    Under goal
+                  </span>
+                )}
+              </div>
+              <p className="mt-1.5 tabular-nums text-2xl font-bold tracking-tight text-slate-100">{row.count}</p>
+              <p className="mt-0.5 text-xs text-slate-500">
+                {row.goalAtDayEnd != null ? `Goal · ${row.goalAtDayEnd}` : `Goal · ${currentGoal}`} (reference)
+              </p>
+            </div>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+function HistoryAnalyticsView({ history, totalCount, hydrated }) {
+  const sortedAsc = useMemo(() => sortHistoryChronological(history), [history])
+
+  const chartRows = useMemo(() => {
+    return sortedAsc.map((e) => ({
+      dateKey: e.date,
+      label: ymdToChartLabel(e.date),
+      count: e.count,
+    })).slice(-7)
+  }, [sortedAsc])
+
+  const stats = useMemo(() => {
+    const { currentStreak, totalGoalDays } = computeDayStreaks(sortedAsc)
+    const n = sortedAsc.length
+    const sum = sortedAsc.reduce((s, e) => s + e.count, 0)
+    const dailyAvg = n > 0 ? Math.round((sum / n) * 10) / 10 : null
+    return {
+      allTime: Math.max(0, Math.floor(Number(totalCount) || 0)),
+      dailyAvg,
+      currentStreak,
+      totalGoalDays,
+    }
+  }, [sortedAsc, totalCount])
+
+  if (!hydrated) {
+    return (
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-10 text-center text-sm text-slate-500">
+        Loading…
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div className="rounded-2xl border border-slate-800/90 bg-gradient-to-br from-slate-900/90 to-slate-950/80 p-4 shadow-inner shadow-slate-950/50">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">All-time total</p>
+          <p className="mt-2 text-3xl font-bold tabular-nums tracking-tight text-white">{stats.allTime}</p>
+        </div>
+        <div className="rounded-2xl border border-slate-800/90 bg-gradient-to-br from-slate-900/90 to-slate-950/80 p-4 shadow-inner shadow-slate-950/50">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Daily average</p>
+          <p className="mt-2 text-3xl font-bold tabular-nums tracking-tight text-emerald-400/95">
+            {stats.dailyAvg == null ? '—' : stats.dailyAvg}
+          </p>
+          <p className="mt-1 text-[11px] text-slate-600">From history</p>
+        </div>
+        <div className="rounded-2xl border border-slate-800/90 bg-gradient-to-br from-slate-900/90 to-slate-950/80 p-4 shadow-inner shadow-slate-950/50">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Goal streak</p>
+          <p className="mt-2 text-3xl font-bold tabular-nums tracking-tight text-blue-400/95">
+            {stats.currentStreak}
+          </p>
+          <p className="mt-1 text-[11px] text-slate-500">
+            {stats.totalGoalDays} day{stats.totalGoalDays === 1 ? '' : 's'} hit goal · total
+          </p>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
+        <p className="text-xs font-medium text-slate-400">Last sessions</p>
+        {sortedAsc.length === 0 ? (
+          <div className="mt-10 flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-800 bg-slate-950/40 py-14 text-center">
+            <p className="max-w-[240px] text-sm leading-relaxed text-slate-500">
+              No workouts logged yet. Smash some reps to see your graph!
+            </p>
+          </div>
+        ) : (
+          <div className="mt-4 h-[240px] w-full min-w-0">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartRows} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="pushAreaFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#34d399" stopOpacity={0.5} />
+                    <stop offset="55%" stopColor="#3b82f6" stopOpacity={0.12} />
+                    <stop offset="100%" stopColor="#34d399" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 6" stroke="#1e293b" vertical={false} />
+                <XAxis
+                  dataKey="label"
+                  tick={{ fill: '#64748b', fontSize: 11 }}
+                  axisLine={{ stroke: '#334155' }}
+                  tickLine={false}
+                />
+                <YAxis
+                  tick={{ fill: '#64748b', fontSize: 11 }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={36}
+                />
+                <Tooltip
+                  cursor={{ stroke: '#475569', strokeWidth: 1 }}
+                  content={({ active, payload }) => {
+                    if (!active || !payload?.length) return null
+                    const p = payload[0]
+                    return (
+                      <div className="rounded-xl border border-slate-700/90 bg-slate-900/95 px-3.5 py-2.5 shadow-xl shadow-emerald-950/20 backdrop-blur-md">
+                        <p className="text-[11px] font-medium text-slate-400">{p.payload.label}</p>
+                        <p className="mt-0.5 text-lg font-bold tabular-nums text-emerald-300">
+                          {p.payload.count} reps
+                        </p>
+                      </div>
+                    )
+                  }}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="count"
+                  stroke="#34d399"
+                  strokeWidth={2.5}
+                  fill="url(#pushAreaFill)"
+                  dot={{ fill: '#10b981', stroke: '#0f172a', strokeWidth: 2, r: 4 }}
+                  activeDot={{ r: 6, fill: '#34d399', stroke: '#fff', strokeWidth: 2 }}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function NavIconDashboard({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75A2.25 2.25 0 0115.75 18h2.25A2.25 2.25 0 0120.25 15.75v-2.25A2.25 2.25 0 0118 11.25h-2.25a2.25 2.25 0 01-2.25 2.25v2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25z" />
+    </svg>
+  )
+}
+
+function NavIconHistory({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  )
+}
+
+function NavIconTrophy({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 18.75h-9m9 0a3 3 0 003-3V9a3 3 0 00-3-3h-5.25m5.25 0a3 3 0 00-3-3h-3a3 3 0 00-3 3m6 0V6m-6 0V9a3 3 0 003 3h3a3 3 0 003-3V9m-6 0h6" />
+    </svg>
+  )
+}
+
+function LeaderboardSkeleton({ rows = 5 }) {
+  return (
+    <ul className="mt-4 space-y-2">
+      {Array.from({ length: rows }, (_, i) => (
+        <li
+          key={`sk-${i}`}
+          className="flex items-center justify-between rounded-xl border border-slate-800/60 bg-slate-800/20 px-3 py-2.5"
+        >
+          <div className="flex items-center gap-3">
+            <span className="h-8 w-8 shrink-0 animate-pulse rounded-lg bg-slate-800" />
+            <span className="h-4 w-28 animate-pulse rounded bg-slate-800" />
+          </div>
+          <span className="h-4 w-8 animate-pulse rounded bg-slate-800" />
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+const NAV = [
+  { id: 'dashboard', label: 'Dashboard', Icon: NavIconDashboard },
+  { id: 'history', label: 'History', Icon: NavIconHistory },
+  { id: 'leaderboard', label: 'Leaderboard', Icon: NavIconTrophy },
+]
+
+async function ensureUserDocument(displayName) {
+  const name = displayName.trim()
+  const userId = toUserDocId(name)
+  const ref = doc(db, 'users', userId)
+  const snap = await getDoc(ref)
+  if (!snap.exists()) {
+    await setDoc(ref, {
+      name,
+      dailyCount: 0,
+      totalCount: 0,
+      dailyGoal: DEFAULT_DAILY_GOAL,
+      history: [],
+      lastUpdated: serverTimestamp(),
+    })
+  } else {
+    const d = snap.data()
+    const patch = {}
+    if (d.dailyGoal === undefined || d.dailyGoal === null) patch.dailyGoal = DEFAULT_DAILY_GOAL
+    if (!Array.isArray(d.history)) patch.history = []
+    if (Object.keys(patch).length > 0) {
+      await updateDoc(ref, patch)
+    }
+  }
+}
+
+function App() {
+  const initialUsername = readStoredUsername()
+  const [username, setUsername] = useState(initialUsername)
+  const [isAuthenticated, setIsAuthenticated] = useState(Boolean(initialUsername))
+
+  const [welcomeName, setWelcomeName] = useState('')
+  const [welcomeInvite, setWelcomeInvite] = useState('')
+  const [welcomeError, setWelcomeError] = useState('')
+  const [isJoining, setIsJoining] = useState(false)
+
+  const [logInput, setLogInput] = useState('')
+  const [activeTab, setActiveTab] = useState('dashboard')
+  const [isLoggingPushups, setIsLoggingPushups] = useState(false)
+  const [logError, setLogError] = useState('')
+
+  const [leaderboardRows, setLeaderboardRows] = useState([])
+  const [leaderboardHydrated, setLeaderboardHydrated] = useState(false)
+  const [syncError, setSyncError] = useState('')
+
+  const [goalModalOpen, setGoalModalOpen] = useState(false)
+  const [goalDraft, setGoalDraft] = useState(String(DEFAULT_DAILY_GOAL))
+  const [goalSaving, setGoalSaving] = useState(false)
+
+  const [fixModalOpen, setFixModalOpen] = useState(false)
+  const [fixDraft, setFixDraft] = useState('0')
+  const [fixSaving, setFixSaving] = useState(false)
+
+  const userDocId = username.trim() ? toUserDocId(username) : ''
+
+  const rankedFriends = useMemo(() => {
+    return [...leaderboardRows].sort(
+      (a, b) => b.today - a.today || String(a.name).localeCompare(String(b.name)),
+    )
+  }, [leaderboardRows])
+
+  const myRow = useMemo(() => rankedFriends.find((r) => r.isYou), [rankedFriends])
+
+  const myHistory = useMemo(
+    () => (Array.isArray(myRow?.history) ? myRow.history : EMPTY_HISTORY),
+    [myRow],
+  )
+
+  const todayCount = myRow?.today ?? 0
+  const myDailyGoal = myRow?.dailyGoal ?? DEFAULT_DAILY_GOAL
+  const myTotalCount = myRow?.totalCount ?? 0
+
+  const myHistoryWithDevPreview = useMemo(
+    () => mergeHistoryWithDevPlaceholders(myHistory),
+    [myHistory],
+  )
+  const myTotalForAnalyticsPreview = useMemo(
+    () => devPreviewTotalCount(myTotalCount, myHistory),
+    [myTotalCount, myHistory],
+  )
+
+  const pctBar = Math.min((todayCount / Math.max(myDailyGoal, 1)) * 100, 100)
+
+  useEffect(() => {
+    if (!isAuthenticated || !username.trim()) return undefined
+
+    let alive = true
+    ;(async () => {
+      try {
+        await ensureUserDocument(username)
+      } catch (e) {
+        console.error(e)
+        if (alive) setSyncError('Could not sync your profile. Check Firestore rules.')
+      }
+    })()
+
+    return () => {
+      alive = false
+    }
+  }, [isAuthenticated, username])
+
+  useEffect(() => {
+    if (!isAuthenticated || !userDocId) return undefined
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        await applyLazyMidnightResetIfNeeded(userDocId)
+      } catch (e) {
+        console.error(e)
+        if (!cancelled) {
+          setSyncError('Could not apply day rollover. Check Firestore rules and try again.')
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [isAuthenticated, userDocId, activeTab])
+
+  useEffect(() => {
+    if (!isAuthenticated || !userDocId) return undefined
+
+    const usersCol = collection(db, 'users')
+    const unsub = onSnapshot(
+      usersCol,
+      (snapshot) => {
+        const next = snapshot.docs.map((d) => {
+          const data = d.data()
+          return {
+            id: d.id,
+            name: typeof data.name === 'string' && data.name.trim() ? data.name.trim() : d.id,
+            today: effectiveDailyCount(data),
+            isYou: d.id === userDocId,
+            dailyGoal: getDailyGoal(data),
+            history: parseHistoryFromFirestore(data.history),
+            totalCount: Math.max(0, Math.floor(Number(data.totalCount) || 0)),
+          }
+        })
+        setLeaderboardRows(next)
+        setLeaderboardHydrated(true)
+        setSyncError('')
+      },
+      (err) => {
+        console.error(err)
+        setSyncError('Live sync lost. Refresh or check your connection and Firestore rules.')
+        setLeaderboardHydrated(true)
+      },
+    )
+
+    return () => unsub()
+  }, [isAuthenticated, userDocId])
+
+  const handleJoinCrew = async () => {
+    setWelcomeError('')
+    const name = welcomeName.trim()
+    if (!name || !welcomeInvite.trim()) return
+
+    if (welcomeInvite.trim() !== String(INVITE_CODE).trim()) {
+      setWelcomeError('Invalid invite code. Ask your group admin.')
+      return
+    }
+
+    setIsJoining(true)
+    try {
+      const userId = toUserDocId(name)
+      const ref = doc(db, 'users', userId)
+      const snap = await getDoc(ref)
+      if (!snap.exists()) {
+        await setDoc(ref, {
+          name,
+          dailyCount: 0,
+          totalCount: 0,
+          dailyGoal: DEFAULT_DAILY_GOAL,
+          history: [],
+          lastUpdated: serverTimestamp(),
+        })
+      }
+
+      try {
+        localStorage.setItem(USERNAME_STORAGE_KEY, name)
+      } catch {
+        setWelcomeError('Could not save on this device. Check browser storage settings.')
+        return
+      }
+
+      setUsername(name)
+      setIsAuthenticated(true)
+      setWelcomeName('')
+      setWelcomeInvite('')
+    } catch (e) {
+      console.error(e)
+      setWelcomeError('Could not reach Firestore. Check rules, network, and config.')
+    } finally {
+      setIsJoining(false)
+    }
+  }
+
+  const handleLeaveGroup = () => {
+    try {
+      localStorage.removeItem(USERNAME_STORAGE_KEY)
+    } catch {
+      /* ignore */
+    }
+    setUsername('')
+    setIsAuthenticated(false)
+    setActiveTab('dashboard')
+    setWelcomeName('')
+    setWelcomeInvite('')
+    setWelcomeError('')
+    setLeaderboardRows([])
+    setLeaderboardHydrated(false)
+    setSyncError('')
+    setGoalModalOpen(false)
+    setFixModalOpen(false)
+  }
+
+  const saveDailyGoal = async () => {
+    const n = Number.parseInt(goalDraft, 10)
+    if (!Number.isFinite(n) || n < 1 || n > 99_999 || !userDocId) return
+    setGoalSaving(true)
+    try {
+      await updateDoc(doc(db, 'users', userDocId), { dailyGoal: n })
+      setGoalModalOpen(false)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setGoalSaving(false)
+    }
+  }
+
+  const saveFixedDaily = async () => {
+    const newDaily = Number.parseInt(fixDraft, 10)
+    if (!Number.isFinite(newDaily) || newDaily < 0 || !userDocId) return
+
+    setFixSaving(true)
+    const ref = doc(db, 'users', userDocId)
+    try {
+      await runTransaction(db, async (transaction) => {
+        const snap = await transaction.get(ref)
+        if (!snap.exists()) throw new Error('User document missing')
+        const data = snap.data()
+        const last = lastUpdatedToDate(data.lastUpdated)
+        const now = new Date()
+        let currentDaily = Number(data.dailyCount) || 0
+        if (!last || !isSameLocalCalendarDay(last, now)) {
+          currentDaily = 0
+        }
+        const delta = newDaily - currentDaily
+        transaction.update(ref, {
+          dailyCount: newDaily,
+          totalCount: Math.max(0, (Number(data.totalCount) || 0) + delta),
+          lastUpdated: serverTimestamp(),
+        })
+      })
+      setFixModalOpen(false)
+    } catch (e) {
+      console.error(e)
+      setLogError('Could not update count. Try again.')
+    } finally {
+      setFixSaving(false)
+    }
+  }
+
+  const logPushups = async () => {
+    const n = Number.parseInt(logInput, 10)
+    if (!Number.isFinite(n) || n <= 0 || !userDocId) return
+
+    setLogError('')
+    setIsLoggingPushups(true)
+    const ref = doc(db, 'users', userDocId)
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const snap = await transaction.get(ref)
+        if (!snap.exists()) {
+          throw new Error('User document missing')
+        }
+        const data = snap.data()
+        const last = lastUpdatedToDate(data.lastUpdated)
+        const now = new Date()
+        let daily = Number(data.dailyCount) || 0
+        if (!last || !isSameLocalCalendarDay(last, now)) {
+          daily = 0
+        }
+        transaction.update(ref, {
+          dailyCount: daily + n,
+          totalCount: increment(n),
+          lastUpdated: serverTimestamp(),
+        })
+      })
+      setLogInput('')
+    } catch (e) {
+      console.error(e)
+      setLogError('Update failed. Try again.')
+    } finally {
+      setIsLoggingPushups(false)
+    }
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <WelcomeScreen
+        nameInput={welcomeName}
+        setNameInput={(v) => {
+          setWelcomeName(v)
+          setWelcomeError('')
+        }}
+        inviteInput={welcomeInvite}
+        setInviteInput={(v) => {
+          setWelcomeInvite(v)
+          setWelcomeError('')
+        }}
+        onJoin={handleJoinCrew}
+        welcomeError={welcomeError}
+        isJoining={isJoining}
+      />
+    )
+  }
+
+  return (
+    <div className="min-h-dvh bg-slate-950 font-sans text-slate-100 antialiased">
+      <div className="mx-auto flex min-h-dvh max-w-lg flex-col">
+        {syncError && (
+          <div
+            className="mx-4 mt-3 rounded-xl border border-amber-500/35 bg-amber-950/40 px-3 py-2 text-center text-[12px] text-amber-100/95"
+            role="status"
+          >
+            {syncError}
+          </div>
+        )}
+
+        <header className="flex shrink-0 items-start justify-between gap-3 px-4 pb-2 pt-[max(1rem,env(safe-area-inset-top))]">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-lg font-semibold tracking-tight text-white">PushApp</h1>
+            <p className="mt-0.5 truncate text-sm font-medium text-emerald-400/95">{username}</p>
+            <p className="text-xs text-slate-500">
+              {activeTab === 'history' ? 'Your training log' : 'Today · live with your crew'}
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-col items-end gap-2">
+            <button
+              type="button"
+              className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-slate-900 text-xs font-semibold text-emerald-400 ring-emerald-500/30 transition hover:border-slate-600 hover:bg-slate-800 focus-visible:outline focus-visible:ring-2 focus-visible:ring-emerald-500"
+              aria-label={`Profile · ${username}`}
+            >
+              {getInitials(username)}
+            </button>
+            <button
+              type="button"
+              onClick={handleLeaveGroup}
+              className="rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-slate-600 hover:bg-slate-800 hover:text-white focus-visible:outline focus-visible:ring-2 focus-visible:ring-emerald-500/50"
+            >
+              Leave Group
+            </button>
+          </div>
+        </header>
+
+        <main className="flex-1 space-y-5 overflow-y-auto px-4 pb-28">
+          {activeTab === 'dashboard' && (
+            <>
+              <section
+                className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-5 shadow-xl shadow-slate-950/50 backdrop-blur-sm"
+                aria-labelledby="log-heading"
+              >
+                <div>
+                  <h2 id="log-heading" className="text-sm font-medium text-slate-300">
+                    Log pushups
+                  </h2>
+                  <p className="mt-1 text-xs text-slate-500">Adds to your day — everyone sees it instantly.</p>
+                </div>
+                {logError && (
+                  <p className="mt-3 text-xs text-red-400" role="alert">
+                    {logError}
+                  </p>
+                )}
+                <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-stretch">
+                  <label className="sr-only" htmlFor="pushup-count">
+                    Number of pushups
+                  </label>
+                  <input
+                    id="pushup-count"
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    placeholder="e.g. 15"
+                    value={logInput}
+                    onChange={(e) => setLogInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && !isLoggingPushups && logPushups()}
+                    disabled={isLoggingPushups || !leaderboardHydrated}
+                    className="min-h-12 w-full rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-base text-white placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    onClick={logPushups}
+                    disabled={isLoggingPushups || !leaderboardHydrated}
+                    className="min-h-12 shrink-0 rounded-xl bg-emerald-500 px-6 text-base font-semibold text-slate-950 shadow-lg shadow-emerald-500/25 transition hover:bg-emerald-400 active:scale-[0.98] focus-visible:outline focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 disabled:pointer-events-none disabled:opacity-50 sm:px-8"
+                  >
+                    {isLoggingPushups ? 'Saving…' : 'Add to today'}
+                  </button>
+                </div>
+                {leaderboardHydrated && (
+                  <p className="mt-3 text-center text-xs tabular-nums text-slate-500">
+                    Today&apos;s total ·{' '}
+                    <span className="font-semibold text-emerald-400/90">{todayCount}</span>
+                  </p>
+                )}
+              </section>
+
+              <section
+                className={`rounded-2xl border border-slate-800/80 bg-slate-900/50 p-5 backdrop-blur-sm ${!leaderboardHydrated ? 'opacity-90' : ''}`}
+                aria-labelledby="progress-heading"
+              >
+                <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="flex min-w-0 flex-1 flex-col items-center lg:items-start">
+                    <div className="flex w-full flex-wrap items-center gap-2">
+                      <h2 id="progress-heading" className="text-sm font-medium text-slate-300">
+                        Daily progress
+                      </h2>
+                      <div className="flex flex-wrap items-center gap-2 lg:ml-auto">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setGoalDraft(String(myDailyGoal))
+                            setGoalModalOpen(true)
+                          }}
+                          disabled={!leaderboardHydrated}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-700/90 bg-slate-800/50 px-2 py-0.5 text-[11px] font-semibold text-emerald-400/95 transition hover:border-emerald-500/40 hover:bg-emerald-500/10 disabled:opacity-40"
+                          aria-label="Edit daily goal"
+                        >
+                          <IconPencil className="h-3.5 w-3.5" />
+                          Edit goal
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFixDraft(String(todayCount))
+                            setFixModalOpen(true)
+                          }}
+                          disabled={!leaderboardHydrated}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-700/90 bg-slate-800/50 px-2 py-0.5 text-[11px] font-semibold text-emerald-400/95 transition hover:border-emerald-500/40 hover:bg-emerald-500/10 disabled:opacity-40"
+                          aria-label="Edit today's count"
+                        >
+                          <IconPencil className="h-3.5 w-3.5" />
+                          Edit
+                        </button>
+                      </div>
+                    </div>
+                    <p className="mt-2 max-w-xs text-center text-xs text-slate-500 lg:text-left">
+                      {!leaderboardHydrated
+                        ? 'Loading your stats…'
+                        : todayCount >= myDailyGoal
+                          ? 'Goal crushed — nice work.'
+                          : `${myDailyGoal - todayCount} pushups to hit your goal.`}
+                    </p>
+                  </div>
+                  <ProgressRing
+                    current={leaderboardHydrated ? todayCount : 0}
+                    goal={leaderboardHydrated ? myDailyGoal : DEFAULT_DAILY_GOAL}
+                  />
+                </div>
+                <div className="mt-4 space-y-2">
+                  <div className="flex justify-between text-xs text-slate-500">
+                    <span>Progress bar</span>
+                    <span className="tabular-nums text-slate-400">
+                      {leaderboardHydrated ? `${Math.round(pctBar)}%` : '—'}
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-blue-500 transition-[width] duration-500 ease-out"
+                      style={{ width: leaderboardHydrated ? `${pctBar}%` : '0%' }}
+                    />
+                  </div>
+                </div>
+              </section>
+
+              <section
+                className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-5 backdrop-blur-sm"
+                aria-labelledby="friends-heading"
+              >
+                <h2 id="friends-heading" className="text-sm font-medium text-slate-300">
+                  Crew · today
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">Live from Firestore — ranked by today&apos;s reps.</p>
+                {!leaderboardHydrated && <LeaderboardSkeleton />}
+                {leaderboardHydrated && rankedFriends.length === 0 && (
+                  <p className="mt-6 text-center text-sm text-slate-500">No one here yet. Invite friends.</p>
+                )}
+                {leaderboardHydrated && rankedFriends.length > 0 && (
+                  <ul className="mt-4 space-y-2">
+                    {rankedFriends.map((friend, index) => (
+                      <li
+                        key={friend.id}
+                        className={`flex items-center justify-between rounded-xl border px-3 py-2.5 ${
+                          friend.isYou
+                            ? 'border-emerald-500/40 bg-emerald-500/10'
+                            : 'border-slate-800 bg-slate-800/40'
+                        }`}
+                      >
+                        <div className="flex min-w-0 items-center gap-3">
+                          <span
+                            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${
+                              index === 0
+                                ? 'bg-amber-500/20 text-amber-400'
+                                : index === 1
+                                  ? 'bg-slate-400/15 text-slate-300'
+                                  : index === 2
+                                    ? 'bg-orange-700/30 text-orange-300'
+                                    : 'bg-slate-800 text-slate-500'
+                            }`}
+                          >
+                            {index + 1}
+                          </span>
+                          <span
+                            className={`truncate font-medium ${friend.isYou ? 'text-emerald-200' : 'text-slate-200'}`}
+                          >
+                            {friend.name}
+                            {friend.isYou && (
+                              <span className="ml-2 text-xs font-normal text-emerald-500/90">(you)</span>
+                            )}
+                          </span>
+                        </div>
+                        <span className="shrink-0 tabular-nums text-sm font-semibold text-white">
+                          {friend.today}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </>
+          )}
+
+          {activeTab === 'history' && (
+            <div className="space-y-4">
+              <section className="rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-900/90 via-slate-950/80 to-slate-950 p-5 backdrop-blur-sm">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-500/85">
+                  Analytics
+                </p>
+                <h2 className="mt-2 text-2xl font-bold tracking-tight text-white">Your progress</h2>
+                <p className="mt-2 max-w-md text-sm leading-relaxed text-slate-500">
+                  Trends from archived days. Full log below.
+                </p>
+              </section>
+
+              <HistoryAnalyticsView
+                history={myHistoryWithDevPreview}
+                totalCount={myTotalForAnalyticsPreview}
+                hydrated={leaderboardHydrated}
+              />
+
+              {leaderboardHydrated && (
+                <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
+                  <h3 className="mb-1 text-sm font-medium text-slate-300">By day</h3>
+                  <p className="mb-4 text-xs text-slate-500">
+                    Raw totals and goal badges.
+                    {import.meta.env.DEV && (
+                      <span className="mt-1 block text-amber-500/90">
+                        Dev: sample past days are merged here to preview analytics.
+                      </span>
+                    )}
+                  </p>
+                  <HistoryTimeRail history={myHistoryWithDevPreview} currentGoal={myDailyGoal} />
+                </section>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'leaderboard' && (
+            <section
+              className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-5 backdrop-blur-sm"
+              aria-labelledby="board-heading"
+            >
+              <h2 id="board-heading" className="text-sm font-medium text-slate-300">
+                Full leaderboard
+              </h2>
+              <p className="mt-1 text-xs text-slate-500">Same live list — easy to screenshot.</p>
+              {!leaderboardHydrated && <LeaderboardSkeleton rows={7} />}
+              {leaderboardHydrated && rankedFriends.length === 0 && (
+                <p className="mt-6 text-center text-sm text-slate-500">No entries yet.</p>
+              )}
+              {leaderboardHydrated && rankedFriends.length > 0 && (
+                <ul className="mt-4 divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-800/30">
+                  {rankedFriends.map((friend, index) => (
+                    <li
+                      key={`full-${friend.id}`}
+                      className={`flex items-center justify-between px-4 py-3 first:rounded-t-xl last:rounded-b-xl ${
+                        friend.isYou ? 'bg-emerald-500/5' : ''
+                      }`}
+                    >
+                      <span className="flex items-center gap-3 text-sm">
+                        <span className="w-6 tabular-nums text-slate-500">{index + 1}.</span>
+                        <span className={friend.isYou ? 'font-medium text-emerald-300' : 'text-slate-200'}>
+                          {friend.name}
+                        </span>
+                      </span>
+                      <span className="tabular-nums text-sm font-semibold text-blue-400">{friend.today}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+        </main>
+
+        <nav
+          className="fixed bottom-0 left-0 right-0 z-10 border-t border-slate-800/90 bg-slate-950/90 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-md"
+          aria-label="Primary"
+        >
+          <div className="mx-auto flex max-w-lg justify-around gap-1">
+            {NAV.map(({ id, label, Icon }) => {
+              const active = activeTab === id
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setActiveTab(id)}
+                  className={`flex flex-1 flex-col items-center gap-0.5 rounded-xl py-2 text-xs font-medium transition ${
+                    active ? 'text-emerald-400' : 'text-slate-500 hover:text-slate-400'
+                  }`}
+                >
+                  <Icon className={`h-6 w-6 ${active ? 'text-emerald-400' : ''}`} />
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        </nav>
+      </div>
+
+      {goalModalOpen && (
+        <MicroModal title="Goal" onClose={() => !goalSaving && setGoalModalOpen(false)}>
+          <label htmlFor="goal-input" className="sr-only">
+            Daily goal
+          </label>
+          <input
+            id="goal-input"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            value={goalDraft}
+            onChange={(e) => setGoalDraft(e.target.value)}
+            className={panelInputClass}
+          />
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setGoalModalOpen(false)}
+              disabled={goalSaving}
+              className="rounded-xl border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={saveDailyGoal}
+              disabled={goalSaving}
+              className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+            >
+              {goalSaving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </MicroModal>
+      )}
+
+      {fixModalOpen && (
+        <MicroModal title="Today" onClose={() => !fixSaving && setFixModalOpen(false)}>
+          <label htmlFor="fix-input" className="sr-only">
+            Today count
+          </label>
+          <input
+            id="fix-input"
+            type="number"
+            inputMode="numeric"
+            min={0}
+            value={fixDraft}
+            onChange={(e) => setFixDraft(e.target.value)}
+            className={panelInputClass}
+          />
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setFixModalOpen(false)}
+              disabled={fixSaving}
+              className="rounded-xl border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={saveFixedDaily}
+              disabled={fixSaving}
+              className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+            >
+              {fixSaving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </MicroModal>
+      )}
+    </div>
+  )
+}
+
+export default App

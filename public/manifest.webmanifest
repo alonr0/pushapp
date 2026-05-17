@@ -1,0 +1,17 @@
+{
+  "name": "PushApp",
+  "short_name": "PushApp",
+  "description": "Track pushups with your crew",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

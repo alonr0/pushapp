@@ -23,6 +23,8 @@ import {
 } from 'firebase/firestore'
 import { db } from './firebase'
 
+const LOGO_SRC = '/logo.png'
+
 const DEFAULT_DAILY_GOAL = 50
 const USERNAME_STORAGE_KEY = 'username'
 const GROUP_ID_STORAGE_KEY = 'pushapp_groupId'
@@ -255,9 +257,12 @@ function WelcomeScreen({
 
       <div className="relative mx-auto flex min-h-dvh max-w-md flex-col justify-center px-5 py-12 pt-[max(3rem,env(safe-area-inset-top))] pb-[max(3rem,env(safe-area-inset-bottom))]">
         <div className="mb-10">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-emerald-400/80">
-            PushApp
-          </p>
+          <div className="flex items-center gap-2.5">
+            <img src={LOGO_SRC} alt="" className="h-10 w-10 shrink-0 rounded-xl object-contain" />
+            <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-emerald-400/80">
+              PushApp
+            </p>
+          </div>
           <h1 className="mt-3 text-4xl font-bold tracking-tight text-white">Join your crew</h1>
           <p className="mt-3 text-[15px] leading-relaxed text-slate-500">
             Two taps. No passwords. Your stats sync live with the group.
@@ -558,7 +563,7 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
         ) : (
           <div className="mt-4 h-[240px] w-full min-w-0">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartRows} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
+              <AreaChart data={chartRows} margin={{ top: 8, right: 12, left: 4, bottom: 4 }}>
                 <defs>
                   <linearGradient id="pushAreaFill" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="#34d399" stopOpacity={0.5} />
@@ -577,7 +582,8 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
                   tick={{ fill: '#64748b', fontSize: 11 }}
                   axisLine={false}
                   tickLine={false}
-                  width={36}
+                  width={48}
+                  tickMargin={4}
                 />
                 <Tooltip
                   cursor={{ stroke: '#475569', strokeWidth: 1 }}
@@ -1044,7 +1050,10 @@ function App() {
 
         <header className="flex shrink-0 items-start justify-between gap-3 px-4 pb-2 pt-[max(1rem,env(safe-area-inset-top))]">
           <div className="min-w-0 flex-1">
-            <h1 className="text-lg font-semibold tracking-tight text-white">PushApp</h1>
+            <h1 className="flex items-center gap-2.5 text-lg font-semibold tracking-tight text-white">
+              <img src={LOGO_SRC} alt="" className="h-9 w-9 shrink-0 rounded-lg object-contain" />
+              PushApp
+            </h1>
             <p className="mt-0.5 truncate text-sm font-medium text-emerald-400/95">{username}</p>
             <p className="truncate text-xs font-semibold tracking-tight text-blue-400/90">
               {groupDisplayName || '\u00A0'}

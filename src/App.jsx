@@ -181,19 +181,125 @@ function devPreviewTotalCount(firestoreTotal, realHistory) {
   return firestoreTotal + boost
 }
 
+/** Distinct leaderboards per day — cycle when previewing >12 days. */
+const DEV_HISTORICAL_SCENARIOS = [
+  [
+    { name: 'Jordan', score: 72 },
+    { name: 'Sam', score: 58 },
+    { name: 'Riley', score: 58 },
+    { name: 'Casey', score: 41 },
+    { name: 'Alex', score: 35 },
+  ],
+  [
+    { name: 'Sam', score: 88 },
+    { name: 'Jordan', score: 76 },
+    { name: 'Casey', score: 62 },
+    { name: 'Riley', score: 49 },
+    { name: 'Alex', score: 44 },
+  ],
+  [
+    { name: 'Riley', score: 95 },
+    { name: 'Jordan', score: 71 },
+    { name: 'Sam', score: 54 },
+    { name: 'Alex', score: 52 },
+    { name: 'Casey', score: 38 },
+  ],
+  [
+    { name: 'Casey', score: 64 },
+    { name: 'Alex', score: 64 },
+    { name: 'Jordan', score: 51 },
+    { name: 'Sam', score: 47 },
+    { name: 'Riley', score: 29 },
+  ],
+  [
+    { name: 'Casey', score: 81 },
+    { name: 'Riley', score: 73 },
+    { name: 'Sam', score: 60 },
+    { name: 'Jordan', score: 55 },
+    { name: 'Alex', score: 48 },
+  ],
+  [
+    { name: 'Alex', score: 67 },
+    { name: 'Jordan', score: 65 },
+    { name: 'Sam', score: 65 },
+    { name: 'Riley', score: 42 },
+    { name: 'Casey', score: 36 },
+  ],
+  [
+    { name: 'Jordan', score: 50 },
+    { name: 'Sam', score: 50 },
+    { name: 'Riley', score: 50 },
+    { name: 'Casey', score: 33 },
+    { name: 'Alex', score: 28 },
+  ],
+  [
+    { name: 'Sam', score: 43 },
+    { name: 'Riley', score: 41 },
+    { name: 'Jordan', score: 40 },
+  ],
+  [
+    { name: 'Riley', score: 56 },
+    { name: 'Casey', score: 55 },
+    { name: 'Alex', score: 54 },
+    { name: 'Jordan', score: 53 },
+    { name: 'Sam', score: 52 },
+  ],
+  [
+    { name: 'Jordan', score: 100 },
+    { name: 'Sam', score: 22 },
+    { name: 'Riley', score: 18 },
+    { name: 'Casey', score: 15 },
+    { name: 'Alex', score: 12 },
+  ],
+  [
+    { name: 'Alex', score: 78 },
+    { name: 'Casey', score: 71 },
+    { name: 'Sam', score: 45 },
+    { name: 'Jordan', score: 44 },
+    { name: 'Riley', score: 40 },
+  ],
+  [
+    { name: 'Sam', score: 59 },
+    { name: 'Jordan', score: 59 },
+    { name: 'Riley', score: 51 },
+    { name: 'Casey', score: 46 },
+    { name: 'Alex', score: 39 },
+  ],
+]
+
+function rankDevScoreEntries(entries) {
+  const sorted = [...entries].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+  let rank = 0
+  let prev = null
+  return sorted.map((e, i) => {
+    if (prev === null || e.score < prev) rank = i + 1
+    prev = e.score
+    return { name: e.name, score: e.score, rank }
+  })
+}
+
+function daysAgoForYMD(dateYMD) {
+  const parts = dateYMD.split('-').map(Number)
+  if (parts.length !== 3) return 1
+  const [y, m, d] = parts
+  const target = new Date(y, m - 1, d, 12, 0, 0, 0)
+  const today = new Date()
+  today.setHours(12, 0, 0, 0)
+  return Math.max(1, Math.round((today.getTime() - target.getTime()) / 86400000))
+}
+
+function devScenarioForDaysAgo(daysAgo) {
+  const idx = (daysAgo - 1) % DEV_HISTORICAL_SCENARIOS.length
+  return DEV_HISTORICAL_SCENARIOS[idx]
+}
+
 function buildDevYesterdayRankings() {
-  return [
-    { name: 'Jordan', score: 72, rank: 1 },
-    { name: 'Sam', score: 58, rank: 2 },
-    { name: 'Riley', score: 58, rank: 2 },
-    { name: 'Casey', score: 41, rank: 4 },
-    { name: 'Alex', score: 35, rank: 5 },
-  ]
+  return rankDevScoreEntries(devScenarioForDaysAgo(1))
 }
 
 function buildDevGroupLeaderboardDates() {
   const dates = []
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 21; i++) {
     const d = new Date()
     d.setHours(12, 0, 0, 0)
     d.setDate(d.getDate() - i)
@@ -203,21 +309,7 @@ function buildDevGroupLeaderboardDates() {
 }
 
 function buildDevRankingsForDate(dateYMD) {
-  const seed = dateYMD.split('').reduce((s, c) => s + c.charCodeAt(0), 0)
-  const names = ['Jordan', 'Sam', 'Riley', 'Casey', 'Alex']
-  const base = [68, 52, 44, 38, 30]
-  const entries = names.map((name, i) => ({
-    name,
-    score: Math.max(12, base[i] - (seed % 7) + (i % 3) * 4),
-  }))
-  entries.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
-  let rank = 0
-  let prev = null
-  return entries.map((e, i) => {
-    if (prev === null || e.score < prev) rank = i + 1
-    prev = e.score
-    return { ...e, rank }
-  })
+  return rankDevScoreEntries(devScenarioForDaysAgo(daysAgoForYMD(dateYMD)))
 }
 
 function buildDevCrewMembers() {
@@ -235,13 +327,31 @@ function mergeDevYesterdayRankings(real) {
   return buildDevYesterdayRankings()
 }
 
-function mergeDevGroupDates(real) {
-  if (!import.meta.env.DEV || real.length > 0) return real
-  return buildDevGroupLeaderboardDates()
+function sortDatesDesc(dates) {
+  return [...dates].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
 }
 
-function mergeDevSelectedRankings(real, dateYMD) {
-  if (!import.meta.env.DEV || real.length > 0 || !dateYMD) return real
+function mergeDevGroupDates(real) {
+  if (!import.meta.env.DEV) return sortDatesDesc(real)
+  const dev = buildDevGroupLeaderboardDates()
+  if (real.length === 0) return dev
+  const seen = new Set()
+  const merged = []
+  for (const d of [...dev, ...real]) {
+    if (!seen.has(d)) {
+      seen.add(d)
+      merged.push(d)
+    }
+  }
+  return sortDatesDesc(merged)
+}
+
+function mergeDevSelectedRankings(real, dateYMD, loadedForDate) {
+  if (!dateYMD) return real
+  const firestore =
+    loadedForDate === dateYMD ? real : []
+  if (!import.meta.env.DEV) return firestore
+  if (firestore.length > 0) return firestore
   return buildDevRankingsForDate(dateYMD)
 }
 
@@ -938,9 +1048,11 @@ function GroupHistoryLeaderboardPanel({
         <label className="flex flex-col gap-1">
           <span className="text-[11px] font-medium text-slate-500">Date</span>
           <select
-            value={selectedDate}
+            value={
+              selectedDate && dates.includes(selectedDate) ? selectedDate : (dates[0] ?? '')
+            }
             onChange={(e) => onSelectDate(e.target.value)}
-            className="rounded-xl border border-slate-700 bg-slate-800/90 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
+            className="relative z-10 rounded-xl border border-slate-700 bg-slate-800/90 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
           >
             {dates.map((d) => (
               <option key={d} value={d}>
@@ -1049,6 +1161,7 @@ function App() {
   const [groupLeaderboardDates, setGroupLeaderboardDates] = useState([])
   const [selectedGroupHistoryDate, setSelectedGroupHistoryDate] = useState('')
   const [selectedGroupRankings, setSelectedGroupRankings] = useState([])
+  const [groupRankingsLoadedForDate, setGroupRankingsLoadedForDate] = useState('')
   const [yesterdayRankings, setYesterdayRankings] = useState([])
   const [groupHistoryHydrated, setGroupHistoryHydrated] = useState(false)
 
@@ -1070,7 +1183,7 @@ function App() {
     [groupLeaderboardDates],
   )
 
-  const effectiveGroupHistoryDate = useMemo(() => {
+  const activeGroupHistoryDate = useMemo(() => {
     if (selectedGroupHistoryDate && displayGroupDates.includes(selectedGroupHistoryDate)) {
       return selectedGroupHistoryDate
     }
@@ -1086,10 +1199,14 @@ function App() {
   const displaySelectedGroupRankings = useMemo(
     () =>
       enrichRankingsWithPodiums(
-        mergeDevSelectedRankings(selectedGroupRankings, effectiveGroupHistoryDate),
+        mergeDevSelectedRankings(
+          selectedGroupRankings,
+          activeGroupHistoryDate,
+          groupRankingsLoadedForDate,
+        ),
         crewRows,
       ),
-    [selectedGroupRankings, effectiveGroupHistoryDate, crewRows],
+    [selectedGroupRankings, activeGroupHistoryDate, groupRankingsLoadedForDate, crewRows],
   )
 
   const myRow = useMemo(() => rankedFriends.find((r) => r.isYou), [rankedFriends])
@@ -1241,13 +1358,14 @@ function App() {
     const unsub = onSnapshot(
       col,
       (snapshot) => {
-        const dates = snapshot.docs.map((d) => d.id).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
+        const dates = snapshot.docs.map((d) => d.id)
         setGroupLeaderboardDates(dates)
         setGroupHistoryHydrated(true)
         setSelectedGroupHistoryDate((prev) => {
-          if (prev && dates.includes(prev)) return prev
-          if (dates.includes(yesterdayYMD)) return yesterdayYMD
-          return dates[0] ?? ''
+          const merged = mergeDevGroupDates(dates)
+          if (prev && merged.includes(prev)) return prev
+          if (merged.includes(yesterdayYMD)) return yesterdayYMD
+          return merged[0] ?? ''
         })
       },
       (err) => {
@@ -1278,22 +1396,33 @@ function App() {
   }, [isAuthenticated, groupId, yesterdayYMD])
 
   useEffect(() => {
-    if (!isAuthenticated || !groupId || !selectedGroupHistoryDate) return undefined
+    if (
+      !isAuthenticated ||
+      !groupId ||
+      !activeGroupHistoryDate ||
+      !displayGroupDates.includes(activeGroupHistoryDate)
+    ) {
+      return undefined
+    }
 
-    const dRef = doc(db, 'groups', groupId, 'dailyLeaderboards', selectedGroupHistoryDate)
+    const dateAtSubscribe = activeGroupHistoryDate
+
+    const dRef = doc(db, 'groups', groupId, 'dailyLeaderboards', dateAtSubscribe)
     const unsub = onSnapshot(
       dRef,
       (snap) => {
         setSelectedGroupRankings(snap.exists() ? parseRankingsFromSnapshot(snap.data()) : [])
+        setGroupRankingsLoadedForDate(dateAtSubscribe)
       },
       (err) => {
         console.error(err)
         setSelectedGroupRankings([])
+        setGroupRankingsLoadedForDate(dateAtSubscribe)
       },
     )
 
     return () => unsub()
-  }, [isAuthenticated, groupId, selectedGroupHistoryDate])
+  }, [isAuthenticated, groupId, activeGroupHistoryDate, displayGroupDates])
 
   const handleJoinCrew = async () => {
     setWelcomeError('')
@@ -1378,6 +1507,7 @@ function App() {
     setGroupLeaderboardDates([])
     setSelectedGroupHistoryDate('')
     setSelectedGroupRankings([])
+    setGroupRankingsLoadedForDate('')
     setYesterdayRankings([])
     setGroupHistoryHydrated(false)
     setSyncError('')
@@ -1785,7 +1915,7 @@ function App() {
 
               <GroupHistoryLeaderboardPanel
                 dates={displayGroupDates}
-                selectedDate={effectiveGroupHistoryDate}
+                selectedDate={selectedGroupHistoryDate}
                 onSelectDate={setSelectedGroupHistoryDate}
                 rankings={displaySelectedGroupRankings}
                 groupName={groupDisplayName}

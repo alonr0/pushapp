@@ -23,6 +23,7 @@ import {
 } from 'firebase/firestore'
 import { db } from './firebase'
 import {
+  assignCompetitionRanks,
   buildFullGroupRankingsForDate,
   buildRankingsFromCrewMembers,
   DEFAULT_PODIUMS,
@@ -709,6 +710,83 @@ function PodiumBadges({ podiums }) {
   )
 }
 
+function AllTimeTotalPodiumCard({ rankings, groupName, hydrated }) {
+  const top = rankings.filter((r) => r.rank <= 3)
+
+  if (!hydrated) {
+    return (
+      <div className="animate-pulse rounded-2xl border border-slate-800 bg-slate-900/50 p-6">
+        <div className="h-4 w-40 rounded bg-slate-800" />
+      </div>
+    )
+  }
+
+  if (top.length === 0) {
+    return (
+      <section className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-6 text-center">
+        <p className="text-sm text-slate-500">No all-time totals yet.</p>
+      </section>
+    )
+  }
+
+  return (
+    <section
+      className="overflow-hidden rounded-2xl border border-violet-500/25 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-950 p-5 shadow-[0_0_40px_-12px_rgba(139,92,246,0.22)]"
+      aria-label="All-time total podium"
+    >
+      <div className="text-center">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-violet-400/90">
+          All-time total
+        </p>
+        <p className="mt-1 text-xs text-slate-500">Lifetime reps in the crew</p>
+        {groupName && (
+          <p className="mt-0.5 truncate text-sm font-semibold text-emerald-400/95">{groupName}</p>
+        )}
+      </div>
+
+      <ul className="mt-5 space-y-2.5">
+        {top.map((row) => {
+          const medal =
+            row.rank === 1 ? '🥇' : row.rank === 2 ? '🥈' : row.rank === 3 ? '🥉' : ''
+          const isFirst = row.rank === 1
+          return (
+            <li
+              key={`alltime-${row.name}-${row.rank}`}
+              className={`flex items-center justify-between rounded-xl border px-4 py-3 ${
+                isFirst
+                  ? 'border-violet-500/40 bg-gradient-to-r from-violet-500/15 to-slate-900/80'
+                  : 'border-slate-800/90 bg-slate-900/60'
+              }`}
+            >
+              <span className="flex min-w-0 items-center gap-2.5">
+                <span className="text-lg" aria-hidden>
+                  {medal}
+                </span>
+                <span className="min-w-0">
+                  <span
+                    className={`block truncate font-semibold ${isFirst ? 'text-violet-100' : 'text-slate-200'}`}
+                  >
+                    {isFirst && <span className="mr-1">👑</span>}
+                    {row.name}
+                  </span>
+                  <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
+                </span>
+              </span>
+              <span
+                className={`shrink-0 tabular-nums text-lg font-bold ${
+                  isFirst ? 'text-violet-300' : 'text-white'
+                }`}
+              >
+                {row.score}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
+
 function YesterdayStandingsCard({ rankings, groupName, dateYMD, hydrated }) {
   const top = rankings.filter((r) => r.rank <= 3)
   const dateLabel = ymdToDisplayLabel(dateYMD)
@@ -1004,6 +1082,17 @@ function App() {
     const rows = buildFullGroupRankingsForDate(leaderboardRows, yesterdayYMD, yesterdayRankings)
     return enrichRankingsWithPodiums(rows, leaderboardRows)
   }, [yesterdayRankings, leaderboardRows, yesterdayYMD])
+
+  const allTimeTotalRankings = useMemo(() => {
+    const entries = leaderboardRows
+      .map((m) => ({
+        name: m.name,
+        score: m.totalCount ?? 0,
+        podiums: m.podiums ?? DEFAULT_PODIUMS,
+      }))
+      .filter((e) => e.score > 0)
+    return assignCompetitionRanks(entries)
+  }, [leaderboardRows])
 
   const historyRankingsLoading =
     Boolean(activeGroupHistoryDate) &&
@@ -1700,6 +1789,12 @@ function App() {
                   </span>
                 </div>
               </section>
+
+              <AllTimeTotalPodiumCard
+                rankings={allTimeTotalRankings}
+                groupName={groupDisplayName}
+                hydrated={leaderboardHydrated}
+              />
 
               <YesterdayStandingsCard
                 rankings={displayYesterdayRankings}

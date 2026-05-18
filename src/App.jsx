@@ -205,6 +205,16 @@ function effectiveDailyCount(data) {
   return raw
 }
 
+/** Highest reps logged on a single day (archived history + today). */
+function bestDailyCountForMember(member) {
+  let best = Math.max(0, Math.floor(Number(member?.today) || 0))
+  for (const h of member?.history ?? []) {
+    const c = Math.max(0, Math.floor(Number(h?.count) || 0))
+    if (c > best) best = c
+  }
+  return best
+}
+
 /**
  * Archives previous calendar day when lastUpdated is not today and dailyCount > 0.
  */
@@ -553,28 +563,44 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <div className="rounded-2xl border border-slate-800/90 bg-gradient-to-br from-slate-900/90 to-slate-950/80 p-4 shadow-inner shadow-slate-950/50">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">All-time total</p>
-          <p className="mt-2 text-3xl font-bold tabular-nums tracking-tight text-white">{stats.allTime}</p>
+      <section
+        className="overflow-hidden rounded-2xl border border-slate-800/90 bg-gradient-to-br from-slate-900/90 to-slate-950/80 shadow-inner shadow-slate-950/50"
+        aria-label="Personal stats"
+      >
+        <div className="grid grid-cols-3 divide-x divide-slate-800/90">
+          <div className="min-w-0 px-2 py-3 text-center sm:px-4 sm:py-4">
+            <p className="text-[9px] font-semibold uppercase leading-tight tracking-wide text-slate-500 sm:text-[10px] sm:tracking-[0.14em]">
+              <span className="sm:hidden">All-time</span>
+              <span className="hidden sm:inline">All-time total</span>
+            </p>
+            <p className="mt-1.5 text-xl font-bold tabular-nums tracking-tight text-white sm:mt-2 sm:text-3xl">
+              {stats.allTime}
+            </p>
+          </div>
+          <div className="min-w-0 px-2 py-3 text-center sm:px-4 sm:py-4">
+            <p className="text-[9px] font-semibold uppercase leading-tight tracking-wide text-slate-500 sm:text-[10px] sm:tracking-[0.14em]">
+              <span className="sm:hidden">Daily avg</span>
+              <span className="hidden sm:inline">Daily average</span>
+            </p>
+            <p className="mt-1.5 text-xl font-bold tabular-nums tracking-tight text-emerald-400/95 sm:mt-2 sm:text-3xl">
+              {stats.dailyAvg == null ? '—' : stats.dailyAvg}
+            </p>
+          </div>
+          <div className="min-w-0 px-2 py-3 text-center sm:px-4 sm:py-4">
+            <p className="text-[9px] font-semibold uppercase leading-tight tracking-wide text-slate-500 sm:text-[10px] sm:tracking-[0.14em]">
+              <span className="sm:hidden">Streak</span>
+              <span className="hidden sm:inline">Goal streak</span>
+            </p>
+            <p className="mt-1.5 text-xl font-bold tabular-nums tracking-tight text-blue-400/95 sm:mt-2 sm:text-3xl">
+              {stats.currentStreak}
+            </p>
+          </div>
         </div>
-        <div className="rounded-2xl border border-slate-800/90 bg-gradient-to-br from-slate-900/90 to-slate-950/80 p-4 shadow-inner shadow-slate-950/50">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Daily average</p>
-          <p className="mt-2 text-3xl font-bold tabular-nums tracking-tight text-emerald-400/95">
-            {stats.dailyAvg == null ? '—' : stats.dailyAvg}
-          </p>
-          <p className="mt-1 text-[11px] text-slate-600">Includes rest days (0 reps)</p>
-        </div>
-        <div className="rounded-2xl border border-slate-800/90 bg-gradient-to-br from-slate-900/90 to-slate-950/80 p-4 shadow-inner shadow-slate-950/50">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Goal streak</p>
-          <p className="mt-2 text-3xl font-bold tabular-nums tracking-tight text-blue-400/95">
-            {stats.currentStreak}
-          </p>
-          <p className="mt-1 text-[11px] text-slate-500">
-            {stats.totalGoalDays} day{stats.totalGoalDays === 1 ? '' : 's'} hit goal · total
-          </p>
-        </div>
-      </div>
+        <p className="border-t border-slate-800/90 px-3 py-2 text-center text-[10px] leading-snug text-slate-600 sm:text-[11px]">
+          Daily avg includes rest days (0 reps) · {stats.totalGoalDays} day
+          {stats.totalGoalDays === 1 ? '' : 's'} hit goal total
+        </p>
+      </section>
 
       <div className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
         <p className="text-xs font-medium text-slate-400">Last sessions</p>
@@ -766,18 +792,24 @@ function AllTimeTotalPodiumCard({ rankings, groupName, hydrated }) {
                   <span
                     className={`block truncate font-semibold ${isFirst ? 'text-violet-100' : 'text-slate-200'}`}
                   >
-                    {isFirst && <span className="mr-1">👑</span>}
                     {row.name}
                   </span>
                   <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
                 </span>
               </span>
-              <span
-                className={`shrink-0 tabular-nums text-lg font-bold ${
-                  isFirst ? 'text-violet-300' : 'text-white'
-                }`}
-              >
-                {row.score}
+              <span className="shrink-0 text-right">
+                <span
+                  className={`block tabular-nums text-lg font-bold ${
+                    isFirst ? 'text-violet-300' : 'text-white'
+                  }`}
+                >
+                  {row.score}
+                </span>
+                {row.bestDay > 0 && (
+                  <span className="mt-0.5 block text-[11px] tabular-nums text-slate-500">
+                    best day {row.bestDay}
+                  </span>
+                )}
               </span>
             </li>
           )
@@ -843,7 +875,6 @@ function YesterdayStandingsCard({ rankings, groupName, dateYMD, hydrated }) {
                 <span
                   className={`truncate font-semibold ${isFirst ? 'text-amber-100' : 'text-slate-200'}`}
                 >
-                  {isFirst && <span className="mr-1">👑</span>}
                   {row.name}
                 </span>
               </span>
@@ -959,10 +990,7 @@ function GroupHistoryLeaderboardPanel({
               <span className="flex min-w-0 items-center gap-3 text-sm">
                 <span className="w-6 shrink-0 tabular-nums text-slate-500">{row.rank}.</span>
                 <span className="min-w-0">
-                  <span className="block truncate font-medium text-slate-200">
-                    {row.rank === 1 && <span className="mr-1">👑</span>}
-                    {row.name}
-                  </span>
+                  <span className="block truncate font-medium text-slate-200">{row.name}</span>
                   <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
                 </span>
               </span>
@@ -1088,6 +1116,7 @@ function App() {
       .map((m) => ({
         name: m.name,
         score: m.totalCount ?? 0,
+        bestDay: bestDailyCountForMember(m),
         podiums: m.podiums ?? DEFAULT_PODIUMS,
       }))
       .filter((e) => e.score > 0)

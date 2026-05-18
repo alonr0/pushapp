@@ -22,6 +22,14 @@ import {
   where,
 } from 'firebase/firestore'
 import { db } from './firebase'
+import {
+  DEFAULT_PODIUMS,
+  ensureYesterdayGroupSnapshot,
+  getYesterdayYMD,
+  parsePodiums,
+  parseRankingsFromSnapshot,
+  ymdToDisplayLabel,
+} from './leaderboardSnapshot'
 
 const LOGO_SRC = '/logo.png'
 
@@ -171,6 +179,93 @@ function devPreviewTotalCount(firestoreTotal, realHistory) {
     .filter((e) => !realDates.has(e.date))
     .reduce((s, e) => s + e.count, 0)
   return firestoreTotal + boost
+}
+
+function buildDevYesterdayRankings() {
+  return [
+    { name: 'Jordan', score: 72, rank: 1 },
+    { name: 'Sam', score: 58, rank: 2 },
+    { name: 'Riley', score: 58, rank: 2 },
+    { name: 'Casey', score: 41, rank: 4 },
+    { name: 'Alex', score: 35, rank: 5 },
+  ]
+}
+
+function buildDevGroupLeaderboardDates() {
+  const dates = []
+  for (let i = 1; i <= 10; i++) {
+    const d = new Date()
+    d.setHours(12, 0, 0, 0)
+    d.setDate(d.getDate() - i)
+    dates.push(formatLocalYMD(d))
+  }
+  return dates
+}
+
+function buildDevRankingsForDate(dateYMD) {
+  const seed = dateYMD.split('').reduce((s, c) => s + c.charCodeAt(0), 0)
+  const names = ['Jordan', 'Sam', 'Riley', 'Casey', 'Alex']
+  const base = [68, 52, 44, 38, 30]
+  const entries = names.map((name, i) => ({
+    name,
+    score: Math.max(12, base[i] - (seed % 7) + (i % 3) * 4),
+  }))
+  entries.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+  let rank = 0
+  let prev = null
+  return entries.map((e, i) => {
+    if (prev === null || e.score < prev) rank = i + 1
+    prev = e.score
+    return { ...e, rank }
+  })
+}
+
+function buildDevCrewMembers() {
+  return [
+    { id: 'dev-jordan', name: 'Jordan', today: 42, isYou: false, podiums: { first: 3, second: 1, third: 2 }, dailyGoal: 50, history: [], totalCount: 1200 },
+    { id: 'dev-sam', name: 'Sam', today: 38, isYou: false, podiums: { first: 1, second: 4, third: 1 }, dailyGoal: 50, history: [], totalCount: 980 },
+    { id: 'dev-riley', name: 'Riley', today: 31, isYou: false, podiums: { first: 0, second: 2, third: 5 }, dailyGoal: 50, history: [], totalCount: 850 },
+    { id: 'dev-casey', name: 'Casey', today: 24, isYou: false, podiums: { first: 2, second: 0, third: 3 }, dailyGoal: 50, history: [], totalCount: 720 },
+    { id: 'dev-you', name: 'Alex', today: 18, isYou: true, podiums: { first: 0, second: 1, third: 2 }, dailyGoal: 50, history: [], totalCount: 540 },
+  ]
+}
+
+function mergeDevYesterdayRankings(real) {
+  if (!import.meta.env.DEV || real.length > 0) return real
+  return buildDevYesterdayRankings()
+}
+
+function mergeDevGroupDates(real) {
+  if (!import.meta.env.DEV || real.length > 0) return real
+  return buildDevGroupLeaderboardDates()
+}
+
+function mergeDevSelectedRankings(real, dateYMD) {
+  if (!import.meta.env.DEV || real.length > 0 || !dateYMD) return real
+  return buildDevRankingsForDate(dateYMD)
+}
+
+function mergeDevCrewForPreview(rows, username) {
+  if (!import.meta.env.DEV || rows.length > 0) return rows
+  const crew = buildDevCrewMembers()
+  if (username.trim()) {
+    return crew.map((m) => ({
+      ...m,
+      isYou: m.name.toLowerCase() === username.trim().toLowerCase(),
+      name: m.isYou ? username.trim() : m.name,
+    }))
+  }
+  return crew
+}
+
+function enrichRankingsWithPodiums(rankings, members) {
+  const byName = new Map(
+    members.map((m) => [m.name.trim().toLowerCase(), m.podiums ?? DEFAULT_PODIUMS]),
+  )
+  return rankings.map((r) => ({
+    ...r,
+    podiums: byName.get(r.name.trim().toLowerCase()) ?? DEFAULT_PODIUMS,
+  }))
 }
 
 /** Stored dailyCount only counts for "today" in the user's local calendar. */
@@ -661,6 +756,226 @@ function LeaderboardSkeleton({ rows = 5 }) {
   )
 }
 
+function PodiumBadges({ podiums }) {
+  const { first, second, third } = podiums
+  if (first === 0 && second === 0 && third === 0) return null
+  return (
+    <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-slate-500">
+      {first > 0 && (
+        <span className="tabular-nums">
+          👑×{first}
+        </span>
+      )}
+      {second > 0 && (
+        <span className="tabular-nums">
+          🥈×{second}
+        </span>
+      )}
+      {third > 0 && (
+        <span className="tabular-nums">
+          🥉×{third}
+        </span>
+      )}
+    </span>
+  )
+}
+
+function YesterdayStandingsCard({ rankings, groupName, dateYMD, hydrated }) {
+  const top = rankings.filter((r) => r.rank <= 3)
+  const dateLabel = ymdToDisplayLabel(dateYMD)
+
+  if (!hydrated) {
+    return (
+      <div className="animate-pulse rounded-2xl border border-slate-800 bg-slate-900/50 p-6">
+        <div className="h-4 w-32 rounded bg-slate-800" />
+      </div>
+    )
+  }
+
+  if (rankings.length === 0) {
+    return (
+      <section className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-6 text-center">
+        <p className="text-sm text-slate-500">No standings for yesterday yet.</p>
+      </section>
+    )
+  }
+
+  return (
+    <section
+      className="overflow-hidden rounded-2xl border border-amber-500/25 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-950 p-5 shadow-[0_0_40px_-12px_rgba(251,191,36,0.25)]"
+      aria-label="Yesterday's standings"
+    >
+      <div className="text-center">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-amber-400/90">
+          Yesterday&apos;s standings
+        </p>
+        <p className="mt-1 text-xs text-slate-500">{dateLabel}</p>
+        {groupName && (
+          <p className="mt-0.5 truncate text-sm font-semibold text-emerald-400/95">{groupName}</p>
+        )}
+      </div>
+
+      <ul className="mt-5 space-y-2.5">
+        {top.map((row) => {
+          const medal =
+            row.rank === 1 ? '🥇' : row.rank === 2 ? '🥈' : row.rank === 3 ? '🥉' : ''
+          const isFirst = row.rank === 1
+          return (
+            <li
+              key={`${row.name}-${row.rank}`}
+              className={`flex items-center justify-between rounded-xl border px-4 py-3 ${
+                isFirst
+                  ? 'border-amber-500/40 bg-gradient-to-r from-amber-500/15 to-slate-900/80'
+                  : 'border-slate-800/90 bg-slate-900/60'
+              }`}
+            >
+              <span className="flex min-w-0 items-center gap-2.5">
+                <span className="text-lg" aria-hidden>
+                  {medal}
+                </span>
+                <span
+                  className={`truncate font-semibold ${isFirst ? 'text-amber-100' : 'text-slate-200'}`}
+                >
+                  {isFirst && <span className="mr-1">👑</span>}
+                  {row.name}
+                </span>
+              </span>
+              <span
+                className={`shrink-0 tabular-nums text-lg font-bold ${
+                  isFirst ? 'text-amber-300' : 'text-white'
+                }`}
+              >
+                {row.score}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+
+      {rankings.length > 3 && (
+        <p className="mt-4 text-center text-[11px] text-slate-600">
+          +{rankings.length - 3} more in the full log below
+        </p>
+      )}
+    </section>
+  )
+}
+
+function GroupRankingsLog({ title, subtitle, rankings, hydrated, emptyMessage }) {
+  if (!hydrated) {
+    return <LeaderboardSkeleton rows={5} />
+  }
+
+  if (rankings.length === 0) {
+    return (
+      <section className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-6 text-center">
+        <p className="text-sm text-slate-500">{emptyMessage}</p>
+      </section>
+    )
+  }
+
+  return (
+    <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
+      <h3 className="text-sm font-medium text-slate-300">{title}</h3>
+      {subtitle && <p className="mt-1 text-xs text-slate-500">{subtitle}</p>}
+      <ul className="mt-4 space-y-2">
+        {rankings.map((row) => (
+          <li
+            key={`${row.name}-${row.rank}-${row.score}`}
+            className="flex items-center justify-between rounded-xl border border-slate-800/90 bg-slate-800/35 px-3 py-2.5"
+          >
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-400">
+                {row.rank}
+              </span>
+              <div className="min-w-0">
+                <span className="block truncate font-medium text-slate-200">
+                  {row.rank === 1 && <span className="mr-1">👑</span>}
+                  {row.name}
+                </span>
+                <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
+              </div>
+            </div>
+            <span className="shrink-0 tabular-nums text-sm font-semibold text-white">{row.score}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+function GroupHistoryLeaderboardPanel({
+  dates,
+  selectedDate,
+  onSelectDate,
+  rankings,
+  groupName,
+  hydrated,
+}) {
+  if (!hydrated) {
+    return (
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-6 text-center text-sm text-slate-500">
+        Loading group history…
+      </div>
+    )
+  }
+
+  if (dates.length === 0) {
+    return (
+      <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-6 text-center text-sm text-slate-500">
+        No group leaderboards archived yet.
+      </div>
+    )
+  }
+
+  return (
+    <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h3 className="text-sm font-medium text-slate-300">Group leaderboard</h3>
+          <p className="mt-1 text-xs text-slate-500">Browse past daily results for {groupName || 'your crew'}.</p>
+        </div>
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] font-medium text-slate-500">Date</span>
+          <select
+            value={selectedDate}
+            onChange={(e) => onSelectDate(e.target.value)}
+            className="rounded-xl border border-slate-700 bg-slate-800/90 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
+          >
+            {dates.map((d) => (
+              <option key={d} value={d}>
+                {ymdToDisplayLabel(d)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <ul className="mt-4 divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-800/30">
+        {rankings.length === 0 ? (
+          <li className="px-4 py-6 text-center text-sm text-slate-500">No scores that day.</li>
+        ) : (
+          rankings.map((row) => (
+            <li key={`${selectedDate}-${row.name}-${row.rank}`} className="flex items-center justify-between px-4 py-3">
+              <span className="flex min-w-0 items-center gap-3 text-sm">
+                <span className="w-6 shrink-0 tabular-nums text-slate-500">{row.rank}.</span>
+                <span className="min-w-0">
+                  <span className="block truncate font-medium text-slate-200">
+                    {row.rank === 1 && <span className="mr-1">👑</span>}
+                    {row.name}
+                  </span>
+                  <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
+                </span>
+              </span>
+              <span className="shrink-0 tabular-nums text-sm font-semibold text-blue-400">{row.score}</span>
+            </li>
+          ))
+        )}
+      </ul>
+    </section>
+  )
+}
+
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', Icon: NavIconDashboard },
   { id: 'history', label: 'History', Icon: NavIconHistory },
@@ -683,6 +998,7 @@ async function ensureUserDocument(displayName, groupIdNorm) {
       totalCount: 0,
       dailyGoal: DEFAULT_DAILY_GOAL,
       history: [],
+      podiums: { ...DEFAULT_PODIUMS },
       lastUpdated: serverTimestamp(),
     })
   } else {
@@ -690,6 +1006,7 @@ async function ensureUserDocument(displayName, groupIdNorm) {
     const patch = {}
     if (d.dailyGoal === undefined || d.dailyGoal === null) patch.dailyGoal = DEFAULT_DAILY_GOAL
     if (!Array.isArray(d.history)) patch.history = []
+    if (!d.podiums || typeof d.podiums !== 'object') patch.podiums = { ...DEFAULT_PODIUMS }
     if (d.groupId !== gid) patch.groupId = gid
     if (Object.keys(patch).length > 0) {
       await updateDoc(ref, patch)
@@ -728,15 +1045,62 @@ function App() {
   const [fixDraft, setFixDraft] = useState('0')
   const [fixSaving, setFixSaving] = useState(false)
 
+  const yesterdayYMD = useMemo(() => getYesterdayYMD(), [])
+  const [groupLeaderboardDates, setGroupLeaderboardDates] = useState([])
+  const [selectedGroupHistoryDate, setSelectedGroupHistoryDate] = useState('')
+  const [selectedGroupRankings, setSelectedGroupRankings] = useState([])
+  const [yesterdayRankings, setYesterdayRankings] = useState([])
+  const [groupHistoryHydrated, setGroupHistoryHydrated] = useState(false)
+
   const userDocId = username.trim() && groupId ? toUserDocumentId(username, groupId) : ''
 
+  const crewRows = useMemo(
+    () => mergeDevCrewForPreview(leaderboardRows, username),
+    [leaderboardRows, username],
+  )
+
   const rankedFriends = useMemo(() => {
-    return [...leaderboardRows].sort(
+    return [...crewRows].sort(
       (a, b) => b.today - a.today || String(a.name).localeCompare(String(b.name)),
     )
-  }, [leaderboardRows])
+  }, [crewRows])
+
+  const displayGroupDates = useMemo(
+    () => mergeDevGroupDates(groupLeaderboardDates),
+    [groupLeaderboardDates],
+  )
+
+  const effectiveGroupHistoryDate = useMemo(() => {
+    if (selectedGroupHistoryDate && displayGroupDates.includes(selectedGroupHistoryDate)) {
+      return selectedGroupHistoryDate
+    }
+    if (displayGroupDates.includes(yesterdayYMD)) return yesterdayYMD
+    return displayGroupDates[0] ?? ''
+  }, [selectedGroupHistoryDate, displayGroupDates, yesterdayYMD])
+
+  const displayYesterdayRankings = useMemo(
+    () => enrichRankingsWithPodiums(mergeDevYesterdayRankings(yesterdayRankings), crewRows),
+    [yesterdayRankings, crewRows],
+  )
+
+  const displaySelectedGroupRankings = useMemo(
+    () =>
+      enrichRankingsWithPodiums(
+        mergeDevSelectedRankings(selectedGroupRankings, effectiveGroupHistoryDate),
+        crewRows,
+      ),
+    [selectedGroupRankings, effectiveGroupHistoryDate, crewRows],
+  )
 
   const myRow = useMemo(() => rankedFriends.find((r) => r.isYou), [rankedFriends])
+
+  const myPodiums = myRow?.podiums ?? DEFAULT_PODIUMS
+  const showLeaderboardDevPreview =
+    import.meta.env.DEV &&
+    (yesterdayRankings.length === 0 ||
+      groupLeaderboardDates.length === 0 ||
+      leaderboardRows.length === 0) &&
+    (displayYesterdayRankings.length > 0 || displayGroupDates.length > 0)
 
   const myHistory = useMemo(
     () => (Array.isArray(myRow?.history) ? myRow.history : EMPTY_HISTORY),
@@ -775,6 +1139,26 @@ function App() {
       alive = false
     }
   }, [isAuthenticated, username, groupId])
+
+  useEffect(() => {
+    if (!isAuthenticated || !groupId) return undefined
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        await ensureYesterdayGroupSnapshot(groupId)
+      } catch (e) {
+        console.error(e)
+        if (!cancelled) {
+          setSyncError('Could not finalize yesterday\'s group standings. Check Firestore rules.')
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [isAuthenticated, groupId, activeTab])
 
   useEffect(() => {
     if (!isAuthenticated || !userDocId || !groupId) return undefined
@@ -833,6 +1217,7 @@ function App() {
             dailyGoal: getDailyGoal(data),
             history: parseHistoryFromFirestore(data.history),
             totalCount: Math.max(0, Math.floor(Number(data.totalCount) || 0)),
+            podiums: parsePodiums(data),
           }
         })
         setLeaderboardRows(next)
@@ -848,6 +1233,67 @@ function App() {
 
     return () => unsub()
   }, [isAuthenticated, userDocId, groupId])
+
+  useEffect(() => {
+    if (!isAuthenticated || !groupId) return undefined
+
+    const col = collection(db, 'groups', groupId, 'dailyLeaderboards')
+    const unsub = onSnapshot(
+      col,
+      (snapshot) => {
+        const dates = snapshot.docs.map((d) => d.id).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
+        setGroupLeaderboardDates(dates)
+        setGroupHistoryHydrated(true)
+        setSelectedGroupHistoryDate((prev) => {
+          if (prev && dates.includes(prev)) return prev
+          if (dates.includes(yesterdayYMD)) return yesterdayYMD
+          return dates[0] ?? ''
+        })
+      },
+      (err) => {
+        console.error(err)
+        setGroupHistoryHydrated(true)
+      },
+    )
+
+    return () => unsub()
+  }, [isAuthenticated, groupId, yesterdayYMD])
+
+  useEffect(() => {
+    if (!isAuthenticated || !groupId) return undefined
+
+    const yRef = doc(db, 'groups', groupId, 'dailyLeaderboards', yesterdayYMD)
+    const unsub = onSnapshot(
+      yRef,
+      (snap) => {
+        setYesterdayRankings(snap.exists() ? parseRankingsFromSnapshot(snap.data()) : [])
+      },
+      (err) => {
+        console.error(err)
+        setYesterdayRankings([])
+      },
+    )
+
+    return () => unsub()
+  }, [isAuthenticated, groupId, yesterdayYMD])
+
+  useEffect(() => {
+    if (!isAuthenticated || !groupId || !selectedGroupHistoryDate) return undefined
+
+    const dRef = doc(db, 'groups', groupId, 'dailyLeaderboards', selectedGroupHistoryDate)
+    const unsub = onSnapshot(
+      dRef,
+      (snap) => {
+        setSelectedGroupRankings(snap.exists() ? parseRankingsFromSnapshot(snap.data()) : [])
+      },
+      (err) => {
+        console.error(err)
+        setSelectedGroupRankings([])
+      },
+    )
+
+    return () => unsub()
+  }, [isAuthenticated, groupId, selectedGroupHistoryDate])
 
   const handleJoinCrew = async () => {
     setWelcomeError('')
@@ -884,6 +1330,7 @@ function App() {
           totalCount: 0,
           dailyGoal: DEFAULT_DAILY_GOAL,
           history: [],
+          podiums: { ...DEFAULT_PODIUMS },
           lastUpdated: serverTimestamp(),
         })
       } else {
@@ -928,6 +1375,11 @@ function App() {
     setWelcomeError('')
     setLeaderboardRows([])
     setLeaderboardHydrated(false)
+    setGroupLeaderboardDates([])
+    setSelectedGroupHistoryDate('')
+    setSelectedGroupRankings([])
+    setYesterdayRankings([])
+    setGroupHistoryHydrated(false)
     setSyncError('')
     setGoalModalOpen(false)
     setFixModalOpen(false)
@@ -1059,7 +1511,11 @@ function App() {
               {groupDisplayName || '\u00A0'}
             </p>
             <p className="text-xs text-slate-500">
-              {activeTab === 'history' ? 'Your training log' : 'Today · live with your crew'}
+              {activeTab === 'history'
+                ? 'Your training log'
+                : activeTab === 'leaderboard'
+                  ? 'Standings & podiums'
+                  : 'Today · live with your crew'}
             </p>
           </div>
           <div className="flex shrink-0 flex-col items-end gap-2">
@@ -1236,14 +1692,16 @@ function App() {
                           >
                             {index + 1}
                           </span>
-                          <span
-                            className={`truncate font-medium ${friend.isYou ? 'text-emerald-200' : 'text-slate-200'}`}
-                          >
-                            {friend.name}
-                            {friend.isYou && (
-                              <span className="ml-2 text-xs font-normal text-emerald-500/90">(you)</span>
-                            )}
-                          </span>
+                          <div className="min-w-0">
+                            <span
+                              className={`block truncate font-medium ${friend.isYou ? 'text-emerald-200' : 'text-slate-200'}`}
+                            >
+                              {friend.name}
+                              {friend.isYou && (
+                                <span className="ml-2 text-xs font-normal text-emerald-500/90">(you)</span>
+                              )}
+                            </span>
+                          </div>
                         </div>
                         <span className="shrink-0 tabular-nums text-sm font-semibold text-white">
                           {friend.today}
@@ -1292,39 +1750,48 @@ function App() {
           )}
 
           {activeTab === 'leaderboard' && (
-            <section
-              className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-5 backdrop-blur-sm"
-              aria-labelledby="board-heading"
-            >
-              <h2 id="board-heading" className="text-sm font-medium text-slate-300">
-                Full leaderboard
-              </h2>
-              <p className="mt-1 text-xs text-slate-500">Same live list — easy to screenshot.</p>
-              {!leaderboardHydrated && <LeaderboardSkeleton rows={7} />}
-              {leaderboardHydrated && rankedFriends.length === 0 && (
-                <p className="mt-6 text-center text-sm text-slate-500">No entries yet.</p>
+            <div className="space-y-4">
+              {showLeaderboardDevPreview && (
+                <p className="rounded-xl border border-amber-500/30 bg-amber-950/30 px-3 py-2 text-center text-[11px] text-amber-200/90">
+                  Dev preview: sample yesterday standings, history dates, and podium counts.
+                </p>
               )}
-              {leaderboardHydrated && rankedFriends.length > 0 && (
-                <ul className="mt-4 divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-800/30">
-                  {rankedFriends.map((friend, index) => (
-                    <li
-                      key={`full-${friend.id}`}
-                      className={`flex items-center justify-between px-4 py-3 first:rounded-t-xl last:rounded-b-xl ${
-                        friend.isYou ? 'bg-emerald-500/5' : ''
-                      }`}
-                    >
-                      <span className="flex items-center gap-3 text-sm">
-                        <span className="w-6 tabular-nums text-slate-500">{index + 1}.</span>
-                        <span className={friend.isYou ? 'font-medium text-emerald-300' : 'text-slate-200'}>
-                          {friend.name}
-                        </span>
-                      </span>
-                      <span className="tabular-nums text-sm font-semibold text-blue-400">{friend.today}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+
+              <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
+                <h2 className="text-sm font-medium text-slate-300">Your podiums</h2>
+                <p className="mt-1 text-xs text-slate-500">1st · 2nd · 3rd place finishes in the group.</p>
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <PodiumBadges podiums={myPodiums} />
+                  <span className="text-xs tabular-nums text-slate-500">
+                    🥇 {myPodiums.first} · 🥈 {myPodiums.second} · 🥉 {myPodiums.third}
+                  </span>
+                </div>
+              </section>
+
+              <YesterdayStandingsCard
+                rankings={displayYesterdayRankings}
+                groupName={groupDisplayName}
+                dateYMD={yesterdayYMD}
+                hydrated={groupHistoryHydrated}
+              />
+
+              <GroupRankingsLog
+                title="Yesterday · full log"
+                subtitle={ymdToDisplayLabel(yesterdayYMD)}
+                rankings={displayYesterdayRankings}
+                hydrated={groupHistoryHydrated}
+                emptyMessage="No standings for yesterday yet."
+              />
+
+              <GroupHistoryLeaderboardPanel
+                dates={displayGroupDates}
+                selectedDate={effectiveGroupHistoryDate}
+                onSelectDate={setSelectedGroupHistoryDate}
+                rankings={displaySelectedGroupRankings}
+                groupName={groupDisplayName}
+                hydrated={groupHistoryHydrated}
+              />
+            </div>
           )}
         </main>
 

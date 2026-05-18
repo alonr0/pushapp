@@ -7,6 +7,7 @@ import {
   query,
   runTransaction,
   serverTimestamp,
+  setDoc,
   where,
 } from 'firebase/firestore'
 import { db } from './firebase'
@@ -120,6 +121,25 @@ export function buildRankingsFromCrewMembers(members, dateYMD) {
   return assignCompetitionRanks(entries).map(({ name, score, rank }) => ({ name, score, rank }))
 }
 
+/** Full crew for one day — everyone appears, including 0-rep days (yesterday standings). */
+export function buildFullGroupRankingsForDate(members, dateYMD, snapshotRankings = []) {
+  if (!isValidArchiveDateYMD(dateYMD)) return []
+  const scoreByName = new Map(
+    snapshotRankings.map((r) => [
+      r.name.trim().toLowerCase(),
+      Math.max(0, Math.floor(Number(r.score) || 0)),
+    ]),
+  )
+  const entries = []
+  for (const m of members) {
+    const name = typeof m?.name === 'string' && m.name.trim() ? m.name.trim() : 'Unknown'
+    const key = name.toLowerCase()
+    const score = scoreByName.has(key) ? scoreByName.get(key) : scoreForCrewMember(m, dateYMD)
+    entries.push({ name, score })
+  }
+  return assignCompetitionRanks(entries).map(({ name, score, rank }) => ({ name, score, rank }))
+}
+
 /** Union of Firestore snapshot doc ids and dates found in crew history. */
 /** History picker: archived days only (excludes today and yesterday). */
 export function filterLeaderboardHistoryDates(dates, yesterdayYMD) {
@@ -167,52 +187,96 @@ function snapshotRef(groupId, dateYMD) {
   return doc(db, 'groups', groupId, 'dailyLeaderboards', dateYMD)
 }
 
-/**
- * Creates yesterday's group snapshot if missing. Run before per-user lazy reset.
- * Returns parsed rankings (public fields only).
- */
-export async function ensureYesterdayGroupSnapshot(groupId) {
+function collectScoreDatesFromUserData(data) {
+  const dates = new Set()
+  for (const h of parseHistoryFromFirestore(data?.history)) {
+    if (h.count > 0) dates.add(h.date)
+  }
+  const last = lastUpdatedToDate(data?.lastUpdated)
+  if (last) {
+    const d = formatLocalYMD(last)
+    if (getScoreForDate(data, d) > 0) dates.add(d)
+  }
+  return dates
+}
+
+/** All calendar days with scores across a group's user documents. */
+export function collectGroupArchiveDatesFromUsers(userDocs) {
+  const dates = new Set()
+  for (const { data } of userDocs) {
+    for (const d of collectScoreDatesFromUserData(data)) {
+      if (isValidArchiveDateYMD(d)) dates.add(d)
+    }
+  }
+  return [...dates].sort((a, b) => a.localeCompare(b))
+}
+
+async function loadGroupUserDocs(groupId) {
   const gid = groupId.trim().toLowerCase()
   if (!gid) return []
+  const usersSnap = await getDocs(query(collection(db, 'users'), where('groupId', '==', gid)))
+  return usersSnap.docs.map((d) => ({ id: d.id, data: d.data() }))
+}
 
-  const yesterday = getYesterdayYMD()
-  const snapRef = snapshotRef(gid, yesterday)
+function buildRankedEntriesForDate(userDocs, dateYMD, options = {}) {
+  const { includeZeroScores = false } = options
+  const entries = []
+  for (const { id, data } of userDocs) {
+    const score = getScoreForDate(data, dateYMD)
+    if (score <= 0 && !includeZeroScores) continue
+    const name = typeof data.name === 'string' && data.name.trim() ? data.name.trim() : id
+    entries.push({ userId: id, name, score })
+  }
+  const ranked = assignCompetitionRanks(entries)
+  return {
+    ranked,
+    publicRankings: ranked.map(({ name, score, rank }) => ({ name, score, rank })),
+  }
+}
 
+/**
+ * Creates a group daily leaderboard snapshot for one date if missing.
+ * @returns {{ status: 'invalid'|'exists'|'empty'|'created', rankings: Array }}
+ */
+export async function ensureGroupSnapshotForDate(groupId, dateYMD, options = {}) {
+  const { awardPodiums = false, includeZeroScores = false } = options
+  const gid = groupId.trim().toLowerCase()
+  if (!gid || !isValidArchiveDateYMD(dateYMD)) {
+    return { status: 'invalid', rankings: [] }
+  }
+
+  const snapRef = snapshotRef(gid, dateYMD)
   const existing = await getDoc(snapRef)
   if (existing.exists()) {
-    return parseRankingsFromSnapshot(existing.data())
+    return { status: 'exists', rankings: parseRankingsFromSnapshot(existing.data()) }
   }
 
-  const usersSnap = await getDocs(
-    query(collection(db, 'users'), where('groupId', '==', gid)),
-  )
-
-  const entries = []
-  for (const userDoc of usersSnap.docs) {
-    const data = userDoc.data()
-    const score = getScoreForDate(data, yesterday)
-    if (score <= 0) continue
-    const name =
-      typeof data.name === 'string' && data.name.trim() ? data.name.trim() : userDoc.id
-    entries.push({ userId: userDoc.id, name, score })
+  const userDocs = await loadGroupUserDocs(gid)
+  const { ranked, publicRankings } = buildRankedEntriesForDate(userDocs, dateYMD, {
+    includeZeroScores,
+  })
+  if (publicRankings.length === 0) {
+    return { status: 'empty', rankings: [] }
   }
-
-  const ranked = assignCompetitionRanks(entries)
-  const publicRankings = ranked.map(({ name, score, rank }) => ({ name, score, rank }))
 
   await runTransaction(db, async (transaction) => {
     const snap = await transaction.get(snapRef)
     if (snap.exists()) return
 
-    const podiumEntries = ranked.filter((r) => r.rank <= 3)
+    const podiumEntries = awardPodiums ? ranked.filter((r) => r.rank <= 3) : []
     const userRefs = podiumEntries.map((r) => doc(db, 'users', r.userId))
-    const userSnaps = await Promise.all(userRefs.map((ref) => transaction.get(ref)))
+    const userSnaps =
+      podiumEntries.length > 0
+        ? await Promise.all(userRefs.map((ref) => transaction.get(ref)))
+        : []
 
     transaction.set(snapRef, {
-      date: yesterday,
+      date: dateYMD,
       rankings: publicRankings,
       createdAt: serverTimestamp(),
     })
+
+    if (!awardPodiums) return
 
     for (let i = 0; i < podiumEntries.length; i++) {
       const { userId, rank } = podiumEntries[i]
@@ -228,7 +292,82 @@ export async function ensureYesterdayGroupSnapshot(groupId) {
   })
 
   const after = await getDoc(snapRef)
-  return parseRankingsFromSnapshot(after.data())
+  return { status: 'created', rankings: parseRankingsFromSnapshot(after.data()) }
+}
+
+/**
+ * Rebuilds one day's group snapshot from current user documents (overwrites rankings).
+ */
+export async function rebuildGroupSnapshotForDate(groupId, dateYMD, options = {}) {
+  const { includeZeroScores = true } = options
+  const gid = groupId.trim().toLowerCase()
+  if (!gid || !isValidArchiveDateYMD(dateYMD)) {
+    return { status: 'invalid', rankings: [] }
+  }
+
+  const userDocs = await loadGroupUserDocs(gid)
+  const { publicRankings } = buildRankedEntriesForDate(userDocs, dateYMD, { includeZeroScores })
+  const snapRef = snapshotRef(gid, dateYMD)
+
+  if (publicRankings.length === 0) {
+    return { status: 'empty', rankings: [] }
+  }
+
+  await setDoc(
+    snapRef,
+    {
+      date: dateYMD,
+      rankings: publicRankings,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  )
+
+  return { status: 'updated', rankings: publicRankings }
+}
+
+/**
+ * Writes missing `dailyLeaderboards` docs from crew history (retroactive).
+ * Does not award podiums by default — avoids inflating counts for past days.
+ */
+export async function backfillGroupDailyLeaderboards(groupId, options = {}) {
+  const { awardPodiums = false, onProgress } = options
+  const gid = groupId.trim().toLowerCase()
+  if (!gid) {
+    return { dates: [], created: [], skipped: [], empty: [], failed: [] }
+  }
+
+  const userDocs = await loadGroupUserDocs(gid)
+  const dates = collectGroupArchiveDatesFromUsers(userDocs)
+  const summary = { dates, created: [], skipped: [], empty: [], failed: [] }
+
+  for (const dateYMD of dates) {
+    onProgress?.(dateYMD)
+    try {
+      const result = await ensureGroupSnapshotForDate(gid, dateYMD, { awardPodiums })
+      if (result.status === 'created') summary.created.push(dateYMD)
+      else if (result.status === 'exists') summary.skipped.push(dateYMD)
+      else if (result.status === 'empty') summary.empty.push(dateYMD)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      summary.failed.push({ date: dateYMD, message })
+    }
+  }
+
+  return summary
+}
+
+/**
+ * Creates yesterday's group snapshot if missing. Run before per-user lazy reset.
+ * Returns parsed rankings (public fields only).
+ */
+export async function ensureYesterdayGroupSnapshot(groupId) {
+  const yesterday = getYesterdayYMD()
+  const result = await ensureGroupSnapshotForDate(groupId, yesterday, {
+    awardPodiums: true,
+    includeZeroScores: true,
+  })
+  return result.rankings
 }
 
 export function ymdToDisplayLabel(ymd) {

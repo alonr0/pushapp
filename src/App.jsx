@@ -23,6 +23,7 @@ import {
 } from 'firebase/firestore'
 import { db } from './firebase'
 import {
+  buildFullGroupRankingsForDate,
   buildRankingsFromCrewMembers,
   DEFAULT_PODIUMS,
   discoverGroupArchiveDates,
@@ -122,6 +123,43 @@ function sortHistoryChronological(history) {
   return [...history].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
 }
 
+function shiftYMD(ymd, days) {
+  const parts = ymd.split('-').map((x) => Number.parseInt(x, 10))
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return ymd
+  const [y, m, d] = parts
+  const dt = new Date(y, m - 1, d, 12, 0, 0, 0)
+  dt.setDate(dt.getDate() + days)
+  return formatLocalYMD(dt)
+}
+
+/** Insert 0-rep days from first log through yesterday (chart + average only). */
+function fillHistoryGapsForAnalytics(history, defaultGoal) {
+  const sorted = sortHistoryChronological(history)
+  if (sorted.length === 0) return []
+
+  const start = sorted[0].date
+  const yesterday = getYesterdayYMD()
+  const rangeEnd = yesterday >= start ? yesterday : sorted[sorted.length - 1].date
+  const goal = defaultGoal > 0 ? defaultGoal : DEFAULT_DAILY_GOAL
+  const byDate = new Map(sorted.map((e) => [e.date, e]))
+  const out = []
+
+  let cursor = start
+  while (cursor <= rangeEnd) {
+    const existing = byDate.get(cursor)
+    out.push(
+      existing ?? {
+        date: cursor,
+        count: 0,
+        goalMet: false,
+        goalAtDayEnd: goal,
+      },
+    )
+    cursor = shiftYMD(cursor, 1)
+  }
+  return out
+}
+
 function ymdToChartLabel(ymd) {
   const parts = ymd.split('-').map((x) => Number.parseInt(x, 10))
   if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return ymd
@@ -142,226 +180,8 @@ function computeDayStreaks(sortedAsc) {
   return { currentStreak, totalGoalDays }
 }
 
-/**
- * Dev-only: synthetic past days for Analytics preview (no Firestore writes).
- * Disabled in production builds. Real history entries override the same date.
- */
-function buildDevPlaceholderHistory() {
-  const goal = DEFAULT_DAILY_GOAL
-  const counts = [38, 52, 44, 61, 47, 55, 58, 50, 42]
-  const out = []
-  for (let i = 0; i < counts.length; i++) {
-    const d = new Date()
-    d.setHours(12, 0, 0, 0)
-    const daysAgo = counts.length - i
-    d.setDate(d.getDate() - daysAgo)
-    const c = counts[i]
-    out.push({
-      date: formatLocalYMD(d),
-      count: c,
-      goalMet: c >= goal,
-      goalAtDayEnd: goal,
-    })
-  }
-  return out
-}
-
-function mergeHistoryWithDevPlaceholders(realHistory) {
-  if (!import.meta.env.DEV) return realHistory
-  const placeholders = buildDevPlaceholderHistory()
-  const byDate = new Map()
-  for (const e of placeholders) byDate.set(e.date, { ...e })
-  for (const e of realHistory) byDate.set(e.date, e)
-  return sortHistoryChronological([...byDate.values()])
-}
-
-function devPreviewTotalCount(firestoreTotal, realHistory) {
-  if (!import.meta.env.DEV) return firestoreTotal
-  const realDates = new Set(realHistory.map((e) => e.date))
-  const boost = buildDevPlaceholderHistory()
-    .filter((e) => !realDates.has(e.date))
-    .reduce((s, e) => s + e.count, 0)
-  return firestoreTotal + boost
-}
-
-/** Distinct leaderboards per day — cycle when previewing >12 days. */
-const DEV_HISTORICAL_SCENARIOS = [
-  [
-    { name: 'Jordan', score: 72 },
-    { name: 'Sam', score: 58 },
-    { name: 'Riley', score: 58 },
-    { name: 'Casey', score: 41 },
-    { name: 'Alex', score: 35 },
-  ],
-  [
-    { name: 'Sam', score: 88 },
-    { name: 'Jordan', score: 76 },
-    { name: 'Casey', score: 62 },
-    { name: 'Riley', score: 49 },
-    { name: 'Alex', score: 44 },
-  ],
-  [
-    { name: 'Riley', score: 95 },
-    { name: 'Jordan', score: 71 },
-    { name: 'Sam', score: 54 },
-    { name: 'Alex', score: 52 },
-    { name: 'Casey', score: 38 },
-  ],
-  [
-    { name: 'Casey', score: 64 },
-    { name: 'Alex', score: 64 },
-    { name: 'Jordan', score: 51 },
-    { name: 'Sam', score: 47 },
-    { name: 'Riley', score: 29 },
-  ],
-  [
-    { name: 'Casey', score: 81 },
-    { name: 'Riley', score: 73 },
-    { name: 'Sam', score: 60 },
-    { name: 'Jordan', score: 55 },
-    { name: 'Alex', score: 48 },
-  ],
-  [
-    { name: 'Alex', score: 67 },
-    { name: 'Jordan', score: 65 },
-    { name: 'Sam', score: 65 },
-    { name: 'Riley', score: 42 },
-    { name: 'Casey', score: 36 },
-  ],
-  [
-    { name: 'Jordan', score: 50 },
-    { name: 'Sam', score: 50 },
-    { name: 'Riley', score: 50 },
-    { name: 'Casey', score: 33 },
-    { name: 'Alex', score: 28 },
-  ],
-  [
-    { name: 'Sam', score: 43 },
-    { name: 'Riley', score: 41 },
-    { name: 'Jordan', score: 40 },
-  ],
-  [
-    { name: 'Riley', score: 56 },
-    { name: 'Casey', score: 55 },
-    { name: 'Alex', score: 54 },
-    { name: 'Jordan', score: 53 },
-    { name: 'Sam', score: 52 },
-  ],
-  [
-    { name: 'Jordan', score: 100 },
-    { name: 'Sam', score: 22 },
-    { name: 'Riley', score: 18 },
-    { name: 'Casey', score: 15 },
-    { name: 'Alex', score: 12 },
-  ],
-  [
-    { name: 'Alex', score: 78 },
-    { name: 'Casey', score: 71 },
-    { name: 'Sam', score: 45 },
-    { name: 'Jordan', score: 44 },
-    { name: 'Riley', score: 40 },
-  ],
-  [
-    { name: 'Sam', score: 59 },
-    { name: 'Jordan', score: 59 },
-    { name: 'Riley', score: 51 },
-    { name: 'Casey', score: 46 },
-    { name: 'Alex', score: 39 },
-  ],
-]
-
-function rankDevScoreEntries(entries) {
-  const sorted = [...entries].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
-  let rank = 0
-  let prev = null
-  return sorted.map((e, i) => {
-    if (prev === null || e.score < prev) rank = i + 1
-    prev = e.score
-    return { name: e.name, score: e.score, rank }
-  })
-}
-
-function daysAgoForYMD(dateYMD) {
-  const parts = dateYMD.split('-').map(Number)
-  if (parts.length !== 3) return 1
-  const [y, m, d] = parts
-  const target = new Date(y, m - 1, d, 12, 0, 0, 0)
-  const today = new Date()
-  today.setHours(12, 0, 0, 0)
-  return Math.max(1, Math.round((today.getTime() - target.getTime()) / 86400000))
-}
-
-function devScenarioForDaysAgo(daysAgo) {
-  const idx = (daysAgo - 1) % DEV_HISTORICAL_SCENARIOS.length
-  return DEV_HISTORICAL_SCENARIOS[idx]
-}
-
-function buildDevYesterdayRankings() {
-  return rankDevScoreEntries(devScenarioForDaysAgo(1))
-}
-
-function buildDevGroupLeaderboardDates() {
-  const dates = []
-  for (let i = 2; i <= 22; i++) {
-    const d = new Date()
-    d.setHours(12, 0, 0, 0)
-    d.setDate(d.getDate() - i)
-    dates.push(formatLocalYMD(d))
-  }
-  return dates
-}
-
-function buildDevRankingsForDate(dateYMD) {
-  return rankDevScoreEntries(devScenarioForDaysAgo(daysAgoForYMD(dateYMD)))
-}
-
-function buildDevCrewMembers() {
-  return [
-    { id: 'dev-jordan', name: 'Jordan', today: 42, isYou: false, podiums: { first: 3, second: 1, third: 2 }, dailyGoal: 50, history: [], totalCount: 1200 },
-    { id: 'dev-sam', name: 'Sam', today: 38, isYou: false, podiums: { first: 1, second: 4, third: 1 }, dailyGoal: 50, history: [], totalCount: 980 },
-    { id: 'dev-riley', name: 'Riley', today: 31, isYou: false, podiums: { first: 0, second: 2, third: 5 }, dailyGoal: 50, history: [], totalCount: 850 },
-    { id: 'dev-casey', name: 'Casey', today: 24, isYou: false, podiums: { first: 2, second: 0, third: 3 }, dailyGoal: 50, history: [], totalCount: 720 },
-    { id: 'dev-you', name: 'Alex', today: 18, isYou: true, podiums: { first: 0, second: 1, third: 2 }, dailyGoal: 50, history: [], totalCount: 540 },
-  ]
-}
-
-function mergeDevYesterdayRankings(real) {
-  if (!import.meta.env.DEV || real.length > 0) return real
-  return buildDevYesterdayRankings()
-}
-
 function sortDatesDesc(dates) {
   return [...dates].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
-}
-
-function mergeDevGroupDates(real) {
-  if (!import.meta.env.DEV) return sortDatesDesc(real)
-  if (real.length > 0) return sortDatesDesc(real)
-  return buildDevGroupLeaderboardDates()
-}
-
-function mergeDevSelectedRankings(real, dateYMD, loadedForDate, firestoreDateIds) {
-  if (!dateYMD) return real
-  const firestore = loadedForDate === dateYMD ? real : []
-  const isFirestoreArchive = firestoreDateIds.includes(dateYMD)
-
-  if (!import.meta.env.DEV) return firestore
-  if (isFirestoreArchive) return firestore
-  if (firestore.length > 0) return firestore
-  return buildDevRankingsForDate(dateYMD)
-}
-
-function mergeDevCrewForPreview(rows, username) {
-  if (!import.meta.env.DEV || rows.length > 0) return rows
-  const crew = buildDevCrewMembers()
-  if (username.trim()) {
-    return crew.map((m) => ({
-      ...m,
-      isYou: m.name.toLowerCase() === username.trim().toLowerCase(),
-      name: m.isYou ? username.trim() : m.name,
-    }))
-  }
-  return crew
 }
 
 function enrichRankingsWithPodiums(rankings, members) {
@@ -700,11 +520,13 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
   const sortedAsc = useMemo(() => sortHistoryChronological(history), [history])
 
   const chartRows = useMemo(() => {
-    return sortedAsc.map((e) => ({
-      dateKey: e.date,
-      label: ymdToChartLabel(e.date),
-      count: e.count,
-    })).slice(-7)
+    return sortedAsc
+      .map((e) => ({
+        dateKey: e.date,
+        label: ymdToChartLabel(e.date),
+        count: e.count,
+      }))
+      .slice(-7)
   }, [sortedAsc])
 
   const stats = useMemo(() => {
@@ -740,7 +562,7 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
           <p className="mt-2 text-3xl font-bold tabular-nums tracking-tight text-emerald-400/95">
             {stats.dailyAvg == null ? '—' : stats.dailyAvg}
           </p>
-          <p className="mt-1 text-[11px] text-slate-600">From history</p>
+          <p className="mt-1 text-[11px] text-slate-600">Includes rest days (0 reps)</p>
         </div>
         <div className="rounded-2xl border border-slate-800/90 bg-gradient-to-br from-slate-900/90 to-slate-950/80 p-4 shadow-inner shadow-slate-950/50">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Goal streak</p>
@@ -790,12 +612,13 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
                   cursor={{ stroke: '#475569', strokeWidth: 1 }}
                   content={({ active, payload }) => {
                     if (!active || !payload?.length) return null
-                    const p = payload[0]
+                    const data = payload[0]?.payload
+                    if (!data) return null
                     return (
                       <div className="rounded-xl border border-slate-700/90 bg-slate-900/95 px-3.5 py-2.5 shadow-xl shadow-emerald-950/20 backdrop-blur-md">
-                        <p className="text-[11px] font-medium text-slate-400">{p.payload.label}</p>
+                        <p className="text-[11px] font-medium text-slate-400">{data.label}</p>
                         <p className="mt-0.5 text-lg font-bold tabular-nums text-emerald-300">
-                          {p.payload.count} reps
+                          {data.count} reps
                         </p>
                       </div>
                     )
@@ -1154,24 +977,19 @@ function App() {
 
   const userDocId = username.trim() && groupId ? toUserDocumentId(username, groupId) : ''
 
-  const crewRows = useMemo(
-    () => mergeDevCrewForPreview(leaderboardRows, username),
-    [leaderboardRows, username],
-  )
-
   const rankedFriends = useMemo(() => {
-    return [...crewRows].sort(
+    return [...leaderboardRows].sort(
       (a, b) => b.today - a.today || String(a.name).localeCompare(String(b.name)),
     )
-  }, [crewRows])
+  }, [leaderboardRows])
 
   const discoveredArchiveDates = useMemo(
-    () => discoverGroupArchiveDates(groupLeaderboardDates, crewRows),
-    [groupLeaderboardDates, crewRows],
+    () => discoverGroupArchiveDates(groupLeaderboardDates, leaderboardRows),
+    [groupLeaderboardDates, leaderboardRows],
   )
 
   const historyPickerDates = useMemo(
-    () => filterLeaderboardHistoryDates(mergeDevGroupDates(discoveredArchiveDates), yesterdayYMD),
+    () => filterLeaderboardHistoryDates(sortDatesDesc(discoveredArchiveDates), yesterdayYMD),
     [discoveredArchiveDates, yesterdayYMD],
   )
 
@@ -1183,13 +1001,9 @@ function App() {
   }, [selectedGroupHistoryDate, historyPickerDates])
 
   const displayYesterdayRankings = useMemo(() => {
-    const fromSnapshot = mergeDevYesterdayRankings(yesterdayRankings)
-    const rows =
-      fromSnapshot.length > 0
-        ? fromSnapshot
-        : buildRankingsFromCrewMembers(crewRows, yesterdayYMD)
-    return enrichRankingsWithPodiums(rows, crewRows)
-  }, [yesterdayRankings, crewRows, yesterdayYMD])
+    const rows = buildFullGroupRankingsForDate(leaderboardRows, yesterdayYMD, yesterdayRankings)
+    return enrichRankingsWithPodiums(rows, leaderboardRows)
+  }, [yesterdayRankings, leaderboardRows, yesterdayYMD])
 
   const historyRankingsLoading =
     Boolean(activeGroupHistoryDate) &&
@@ -1203,35 +1017,20 @@ function App() {
     const hasSnapshotDoc = groupLeaderboardDates.includes(date)
     const firestore =
       hasSnapshotDoc && groupRankingsLoadedForDate === date ? selectedGroupRankings : []
-    let rows = firestore.length > 0 ? firestore : buildRankingsFromCrewMembers(crewRows, date)
+    const rows = firestore.length > 0 ? firestore : buildRankingsFromCrewMembers(leaderboardRows, date)
 
-    if (
-      rows.length === 0 &&
-      import.meta.env.DEV &&
-      !groupLeaderboardDates.includes(date) &&
-      !discoveredArchiveDates.includes(date)
-    ) {
-      rows = mergeDevSelectedRankings([], date, date, groupLeaderboardDates)
-    }
-
-    return enrichRankingsWithPodiums(rows, crewRows)
+    return enrichRankingsWithPodiums(rows, leaderboardRows)
   }, [
     activeGroupHistoryDate,
     groupRankingsLoadedForDate,
     selectedGroupRankings,
-    crewRows,
+    leaderboardRows,
     groupLeaderboardDates,
-    discoveredArchiveDates,
   ])
 
   const myRow = useMemo(() => rankedFriends.find((r) => r.isYou), [rankedFriends])
 
   const myPodiums = myRow?.podiums ?? DEFAULT_PODIUMS
-  const showLeaderboardDevPreview =
-    import.meta.env.DEV &&
-    groupLeaderboardDates.length === 0 &&
-    (yesterdayRankings.length === 0 || leaderboardRows.length === 0) &&
-    historyPickerDates.length > 0
 
   const myHistory = useMemo(
     () => (Array.isArray(myRow?.history) ? myRow.history : EMPTY_HISTORY),
@@ -1242,13 +1041,9 @@ function App() {
   const myDailyGoal = myRow?.dailyGoal ?? DEFAULT_DAILY_GOAL
   const myTotalCount = myRow?.totalCount ?? 0
 
-  const myHistoryWithDevPreview = useMemo(
-    () => mergeHistoryWithDevPlaceholders(myHistory),
-    [myHistory],
-  )
-  const myTotalForAnalyticsPreview = useMemo(
-    () => devPreviewTotalCount(myTotalCount, myHistory),
-    [myTotalCount, myHistory],
+  const myHistoryForAnalytics = useMemo(
+    () => fillHistoryGapsForAnalytics(myHistory, myDailyGoal),
+    [myHistory, myDailyGoal],
   )
 
   const pctBar = Math.min((todayCount / Math.max(myDailyGoal, 1)) * 100, 100)
@@ -1377,7 +1172,7 @@ function App() {
         setGroupLeaderboardDates(dates)
         setGroupHistoryHydrated(true)
         setSelectedGroupHistoryDate((prev) => {
-          const merged = filterLeaderboardHistoryDates(mergeDevGroupDates(dates), yesterdayYMD)
+          const merged = filterLeaderboardHistoryDates(sortDatesDesc(dates), yesterdayYMD)
           if (prev && merged.includes(prev)) return prev
           return merged[0] ?? ''
         })
@@ -1878,23 +1673,16 @@ function App() {
               </section>
 
               <HistoryAnalyticsView
-                history={myHistoryWithDevPreview}
-                totalCount={myTotalForAnalyticsPreview}
+                history={myHistoryForAnalytics}
+                totalCount={myTotalCount}
                 hydrated={leaderboardHydrated}
               />
 
               {leaderboardHydrated && (
                 <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
                   <h3 className="mb-1 text-sm font-medium text-slate-300">By day</h3>
-                  <p className="mb-4 text-xs text-slate-500">
-                    Raw totals and goal badges.
-                    {import.meta.env.DEV && (
-                      <span className="mt-1 block text-amber-500/90">
-                        Dev: sample past days are merged here to preview analytics.
-                      </span>
-                    )}
-                  </p>
-                  <HistoryTimeRail history={myHistoryWithDevPreview} currentGoal={myDailyGoal} />
+                  <p className="mb-4 text-xs text-slate-500">Raw totals and goal badges.</p>
+                  <HistoryTimeRail history={myHistory} currentGoal={myDailyGoal} />
                 </section>
               )}
             </div>
@@ -1902,12 +1690,6 @@ function App() {
 
           {activeTab === 'leaderboard' && (
             <div className="space-y-4">
-              {showLeaderboardDevPreview && (
-                <p className="rounded-xl border border-amber-500/30 bg-amber-950/30 px-3 py-2 text-center text-[11px] text-amber-200/90">
-                  Dev preview: sample yesterday standings, history dates, and podium counts.
-                </p>
-              )}
-
               <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
                 <h2 className="text-sm font-medium text-slate-300">Your podiums</h2>
                 <p className="mt-1 text-xs text-slate-500">1st · 2nd · 3rd place finishes in the group.</p>

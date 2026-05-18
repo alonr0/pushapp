@@ -63,17 +63,87 @@ export function parsePodiums(data) {
 
 export const DEFAULT_PODIUMS = { first: 0, second: 0, third: 0 }
 
+function normalizeRankingRow(r, index) {
+  if (!r || typeof r !== 'object') return null
+  const name =
+    typeof r.name === 'string'
+      ? r.name.trim()
+      : typeof r.displayName === 'string'
+        ? r.displayName.trim()
+        : ''
+  if (!name) return null
+  const score = Math.max(0, Math.floor(Number(r.score ?? r.count ?? r.reps ?? r.total) || 0))
+  const rankRaw = Number(r.rank ?? r.place ?? r.position)
+  const rank = Number.isFinite(rankRaw) && rankRaw >= 1 ? Math.floor(rankRaw) : index + 1
+  return { name, score, rank }
+}
+
 export function parseRankingsFromSnapshot(data) {
-  if (!data || !Array.isArray(data.rankings)) return []
-  return data.rankings
-    .map((r) => {
-      if (!r || typeof r.name !== 'string') return null
-      const score = Math.max(0, Math.floor(Number(r.score) || 0))
-      const rank = Math.max(1, Math.floor(Number(r.rank) || 1))
-      return { name: r.name.trim(), score, rank }
-    })
+  if (!data) return []
+  let raw = data.rankings
+  if (!Array.isArray(raw) && Array.isArray(data.entries)) raw = data.entries
+  if (!Array.isArray(raw) && Array.isArray(data.results)) raw = data.results
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((r, i) => normalizeRankingRow(r, i))
     .filter(Boolean)
     .sort((a, b) => a.rank - b.rank || b.score - a.score || a.name.localeCompare(b.name))
+}
+
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
+
+export function isValidArchiveDateYMD(ymd) {
+  return typeof ymd === 'string' && YMD_RE.test(ymd)
+}
+
+function scoreForCrewMember(member, dateYMD) {
+  const hist = Array.isArray(member?.history) ? member.history : []
+  const entry = hist.find((h) => h?.date === dateYMD)
+  if (entry) return Math.max(0, Math.floor(Number(entry.count) || 0))
+  const last = lastUpdatedToDate(member?.lastUpdated)
+  if (last && formatLocalYMD(last) === dateYMD) {
+    return Math.max(0, Math.floor(Number(member.today) || 0))
+  }
+  return 0
+}
+
+/** Build standings for a day from loaded crew rows (history + today). */
+export function buildRankingsFromCrewMembers(members, dateYMD) {
+  if (!isValidArchiveDateYMD(dateYMD)) return []
+  const entries = []
+  for (const m of members) {
+    const score = scoreForCrewMember(m, dateYMD)
+    if (score <= 0) continue
+    const name = typeof m?.name === 'string' && m.name.trim() ? m.name.trim() : 'Unknown'
+    entries.push({ name, score })
+  }
+  return assignCompetitionRanks(entries).map(({ name, score, rank }) => ({ name, score, rank }))
+}
+
+/** Union of Firestore snapshot doc ids and dates found in crew history. */
+/** History picker: archived days only (excludes today and yesterday). */
+export function filterLeaderboardHistoryDates(dates, yesterdayYMD) {
+  if (!yesterdayYMD) {
+    return dates.filter(isValidArchiveDateYMD)
+  }
+  return dates.filter((d) => isValidArchiveDateYMD(d) && d < yesterdayYMD)
+}
+
+export function discoverGroupArchiveDates(firestoreDateIds, crewMembers) {
+  const dates = new Set(firestoreDateIds.filter(isValidArchiveDateYMD))
+  for (const m of crewMembers) {
+    for (const h of m.history ?? []) {
+      if (h?.date && isValidArchiveDateYMD(h.date) && (h.count ?? 0) > 0) {
+        dates.add(h.date)
+      }
+    }
+    const last = lastUpdatedToDate(m?.lastUpdated)
+    if (last && (m.today ?? 0) > 0) {
+      const d = formatLocalYMD(last)
+      if (isValidArchiveDateYMD(d)) dates.add(d)
+    }
+  }
+  return [...dates].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
 }
 
 /** Competition ranking: tied scores share the same rank. */

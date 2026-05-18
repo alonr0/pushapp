@@ -23,7 +23,10 @@ import {
 } from 'firebase/firestore'
 import { db } from './firebase'
 import {
+  buildRankingsFromCrewMembers,
   DEFAULT_PODIUMS,
+  discoverGroupArchiveDates,
+  filterLeaderboardHistoryDates,
   ensureYesterdayGroupSnapshot,
   getYesterdayYMD,
   parsePodiums,
@@ -299,7 +302,7 @@ function buildDevYesterdayRankings() {
 
 function buildDevGroupLeaderboardDates() {
   const dates = []
-  for (let i = 1; i <= 21; i++) {
+  for (let i = 2; i <= 22; i++) {
     const d = new Date()
     d.setHours(12, 0, 0, 0)
     d.setDate(d.getDate() - i)
@@ -333,24 +336,17 @@ function sortDatesDesc(dates) {
 
 function mergeDevGroupDates(real) {
   if (!import.meta.env.DEV) return sortDatesDesc(real)
-  const dev = buildDevGroupLeaderboardDates()
-  if (real.length === 0) return dev
-  const seen = new Set()
-  const merged = []
-  for (const d of [...dev, ...real]) {
-    if (!seen.has(d)) {
-      seen.add(d)
-      merged.push(d)
-    }
-  }
-  return sortDatesDesc(merged)
+  if (real.length > 0) return sortDatesDesc(real)
+  return buildDevGroupLeaderboardDates()
 }
 
-function mergeDevSelectedRankings(real, dateYMD, loadedForDate) {
+function mergeDevSelectedRankings(real, dateYMD, loadedForDate, firestoreDateIds) {
   if (!dateYMD) return real
-  const firestore =
-    loadedForDate === dateYMD ? real : []
+  const firestore = loadedForDate === dateYMD ? real : []
+  const isFirestoreArchive = firestoreDateIds.includes(dateYMD)
+
   if (!import.meta.env.DEV) return firestore
+  if (isFirestoreArchive) return firestore
   if (firestore.length > 0) return firestore
   return buildDevRankingsForDate(dateYMD)
 }
@@ -932,7 +928,7 @@ function YesterdayStandingsCard({ rankings, groupName, dateYMD, hydrated }) {
           const isFirst = row.rank === 1
           return (
             <li
-              key={`${row.name}-${row.rank}`}
+              key={`podium-${row.name}-${row.rank}`}
               className={`flex items-center justify-between rounded-xl border px-4 py-3 ${
                 isFirst
                   ? 'border-amber-500/40 bg-gradient-to-r from-amber-500/15 to-slate-900/80'
@@ -962,54 +958,37 @@ function YesterdayStandingsCard({ rankings, groupName, dateYMD, hydrated }) {
         })}
       </ul>
 
-      {rankings.length > 3 && (
-        <p className="mt-4 text-center text-[11px] text-slate-600">
-          +{rankings.length - 3} more in the full log below
-        </p>
+      {rankings.length > top.length && (
+        <>
+          <div className="my-4 border-t border-amber-500/15" />
+          <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-slate-500">
+            LOSERS:
+          </p>
+          <ul className="space-y-2">
+            {rankings
+              .filter((row) => row.rank > 3)
+              .map((row) => (
+                <li
+                  key={`full-${row.name}-${row.rank}-${row.score}`}
+                  className="flex items-center justify-between rounded-xl border border-slate-800/90 bg-slate-900/50 px-3 py-2.5"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-400">
+                      {row.rank}
+                    </span>
+                    <div className="min-w-0">
+                      <span className="block truncate font-medium text-slate-200">{row.name}</span>
+                      <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
+                    </div>
+                  </div>
+                  <span className="shrink-0 tabular-nums text-sm font-semibold text-white">
+                    {row.score}
+                  </span>
+                </li>
+              ))}
+          </ul>
+        </>
       )}
-    </section>
-  )
-}
-
-function GroupRankingsLog({ title, subtitle, rankings, hydrated, emptyMessage }) {
-  if (!hydrated) {
-    return <LeaderboardSkeleton rows={5} />
-  }
-
-  if (rankings.length === 0) {
-    return (
-      <section className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-6 text-center">
-        <p className="text-sm text-slate-500">{emptyMessage}</p>
-      </section>
-    )
-  }
-
-  return (
-    <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
-      <h3 className="text-sm font-medium text-slate-300">{title}</h3>
-      {subtitle && <p className="mt-1 text-xs text-slate-500">{subtitle}</p>}
-      <ul className="mt-4 space-y-2">
-        {rankings.map((row) => (
-          <li
-            key={`${row.name}-${row.rank}-${row.score}`}
-            className="flex items-center justify-between rounded-xl border border-slate-800/90 bg-slate-800/35 px-3 py-2.5"
-          >
-            <div className="flex min-w-0 items-center gap-3">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-400">
-                {row.rank}
-              </span>
-              <div className="min-w-0">
-                <span className="block truncate font-medium text-slate-200">
-                  {row.rank === 1 && <span className="mr-1">👑</span>}
-                  {row.name}
-                </span>
-                <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
-              </div>
-            </div>
-            <span className="shrink-0 tabular-nums text-sm font-semibold text-white">{row.score}</span>
-          </li>
-        ))}
-      </ul>
     </section>
   )
 }
@@ -1021,6 +1000,7 @@ function GroupHistoryLeaderboardPanel({
   rankings,
   groupName,
   hydrated,
+  loading = false,
 }) {
   if (!hydrated) {
     return (
@@ -1033,7 +1013,7 @@ function GroupHistoryLeaderboardPanel({
   if (dates.length === 0) {
     return (
       <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-6 text-center text-sm text-slate-500">
-        No group leaderboards archived yet.
+        No leaderboard history yet (from two or more days ago).
       </div>
     )
   }
@@ -1042,17 +1022,18 @@ function GroupHistoryLeaderboardPanel({
     <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h3 className="text-sm font-medium text-slate-300">Group leaderboard</h3>
-          <p className="mt-1 text-xs text-slate-500">Browse past daily results for {groupName || 'your crew'}.</p>
+          <h3 className="text-sm font-medium text-slate-300">Leaderboard history</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            Daily results from two or more days ago for {groupName || 'your crew'}.
+          </p>
         </div>
         <label className="flex flex-col gap-1">
           <span className="text-[11px] font-medium text-slate-500">Date</span>
           <select
-            value={
-              selectedDate && dates.includes(selectedDate) ? selectedDate : (dates[0] ?? '')
-            }
+            value={selectedDate && dates.includes(selectedDate) ? selectedDate : (dates[0] ?? '')}
             onChange={(e) => onSelectDate(e.target.value)}
-            className="relative z-10 rounded-xl border border-slate-700 bg-slate-800/90 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
+            disabled={loading}
+            className="relative z-10 rounded-xl border border-slate-700 bg-slate-800/90 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 disabled:opacity-60"
           >
             {dates.map((d) => (
               <option key={d} value={d}>
@@ -1063,6 +1044,11 @@ function GroupHistoryLeaderboardPanel({
         </label>
       </div>
 
+      {loading ? (
+        <div className="mt-4">
+          <LeaderboardSkeleton rows={5} />
+        </div>
+      ) : (
       <ul className="mt-4 divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-800/30">
         {rankings.length === 0 ? (
           <li className="px-4 py-6 text-center text-sm text-slate-500">No scores that day.</li>
@@ -1084,6 +1070,7 @@ function GroupHistoryLeaderboardPanel({
           ))
         )}
       </ul>
+      )}
     </section>
   )
 }
@@ -1178,46 +1165,73 @@ function App() {
     )
   }, [crewRows])
 
-  const displayGroupDates = useMemo(
-    () => mergeDevGroupDates(groupLeaderboardDates),
-    [groupLeaderboardDates],
+  const discoveredArchiveDates = useMemo(
+    () => discoverGroupArchiveDates(groupLeaderboardDates, crewRows),
+    [groupLeaderboardDates, crewRows],
+  )
+
+  const historyPickerDates = useMemo(
+    () => filterLeaderboardHistoryDates(mergeDevGroupDates(discoveredArchiveDates), yesterdayYMD),
+    [discoveredArchiveDates, yesterdayYMD],
   )
 
   const activeGroupHistoryDate = useMemo(() => {
-    if (selectedGroupHistoryDate && displayGroupDates.includes(selectedGroupHistoryDate)) {
+    if (selectedGroupHistoryDate && historyPickerDates.includes(selectedGroupHistoryDate)) {
       return selectedGroupHistoryDate
     }
-    if (displayGroupDates.includes(yesterdayYMD)) return yesterdayYMD
-    return displayGroupDates[0] ?? ''
-  }, [selectedGroupHistoryDate, displayGroupDates, yesterdayYMD])
+    return historyPickerDates[0] ?? ''
+  }, [selectedGroupHistoryDate, historyPickerDates])
 
-  const displayYesterdayRankings = useMemo(
-    () => enrichRankingsWithPodiums(mergeDevYesterdayRankings(yesterdayRankings), crewRows),
-    [yesterdayRankings, crewRows],
-  )
+  const displayYesterdayRankings = useMemo(() => {
+    const fromSnapshot = mergeDevYesterdayRankings(yesterdayRankings)
+    const rows =
+      fromSnapshot.length > 0
+        ? fromSnapshot
+        : buildRankingsFromCrewMembers(crewRows, yesterdayYMD)
+    return enrichRankingsWithPodiums(rows, crewRows)
+  }, [yesterdayRankings, crewRows, yesterdayYMD])
 
-  const displaySelectedGroupRankings = useMemo(
-    () =>
-      enrichRankingsWithPodiums(
-        mergeDevSelectedRankings(
-          selectedGroupRankings,
-          activeGroupHistoryDate,
-          groupRankingsLoadedForDate,
-        ),
-        crewRows,
-      ),
-    [selectedGroupRankings, activeGroupHistoryDate, groupRankingsLoadedForDate, crewRows],
-  )
+  const historyRankingsLoading =
+    Boolean(activeGroupHistoryDate) &&
+    groupLeaderboardDates.includes(activeGroupHistoryDate) &&
+    groupRankingsLoadedForDate !== activeGroupHistoryDate
+
+  const displaySelectedGroupRankings = useMemo(() => {
+    const date = activeGroupHistoryDate
+    if (!date) return []
+
+    const hasSnapshotDoc = groupLeaderboardDates.includes(date)
+    const firestore =
+      hasSnapshotDoc && groupRankingsLoadedForDate === date ? selectedGroupRankings : []
+    let rows = firestore.length > 0 ? firestore : buildRankingsFromCrewMembers(crewRows, date)
+
+    if (
+      rows.length === 0 &&
+      import.meta.env.DEV &&
+      !groupLeaderboardDates.includes(date) &&
+      !discoveredArchiveDates.includes(date)
+    ) {
+      rows = mergeDevSelectedRankings([], date, date, groupLeaderboardDates)
+    }
+
+    return enrichRankingsWithPodiums(rows, crewRows)
+  }, [
+    activeGroupHistoryDate,
+    groupRankingsLoadedForDate,
+    selectedGroupRankings,
+    crewRows,
+    groupLeaderboardDates,
+    discoveredArchiveDates,
+  ])
 
   const myRow = useMemo(() => rankedFriends.find((r) => r.isYou), [rankedFriends])
 
   const myPodiums = myRow?.podiums ?? DEFAULT_PODIUMS
   const showLeaderboardDevPreview =
     import.meta.env.DEV &&
-    (yesterdayRankings.length === 0 ||
-      groupLeaderboardDates.length === 0 ||
-      leaderboardRows.length === 0) &&
-    (displayYesterdayRankings.length > 0 || displayGroupDates.length > 0)
+    groupLeaderboardDates.length === 0 &&
+    (yesterdayRankings.length === 0 || leaderboardRows.length === 0) &&
+    historyPickerDates.length > 0
 
   const myHistory = useMemo(
     () => (Array.isArray(myRow?.history) ? myRow.history : EMPTY_HISTORY),
@@ -1333,6 +1347,7 @@ function App() {
             isYou: d.id === userDocId,
             dailyGoal: getDailyGoal(data),
             history: parseHistoryFromFirestore(data.history),
+            lastUpdated: data.lastUpdated ?? null,
             totalCount: Math.max(0, Math.floor(Number(data.totalCount) || 0)),
             podiums: parsePodiums(data),
           }
@@ -1362,14 +1377,16 @@ function App() {
         setGroupLeaderboardDates(dates)
         setGroupHistoryHydrated(true)
         setSelectedGroupHistoryDate((prev) => {
-          const merged = mergeDevGroupDates(dates)
+          const merged = filterLeaderboardHistoryDates(mergeDevGroupDates(dates), yesterdayYMD)
           if (prev && merged.includes(prev)) return prev
-          if (merged.includes(yesterdayYMD)) return yesterdayYMD
           return merged[0] ?? ''
         })
       },
       (err) => {
         console.error(err)
+        setSyncError(
+          'Could not load group history dates. Check Firestore rules for dailyLeaderboards.',
+        )
         setGroupHistoryHydrated(true)
       },
     )
@@ -1400,18 +1417,22 @@ function App() {
       !isAuthenticated ||
       !groupId ||
       !activeGroupHistoryDate ||
-      !displayGroupDates.includes(activeGroupHistoryDate)
+      !historyPickerDates.includes(activeGroupHistoryDate)
     ) {
       return undefined
     }
 
     const dateAtSubscribe = activeGroupHistoryDate
+    if (!groupLeaderboardDates.includes(dateAtSubscribe)) {
+      return undefined
+    }
 
     const dRef = doc(db, 'groups', groupId, 'dailyLeaderboards', dateAtSubscribe)
     const unsub = onSnapshot(
       dRef,
       (snap) => {
-        setSelectedGroupRankings(snap.exists() ? parseRankingsFromSnapshot(snap.data()) : [])
+        const parsed = snap.exists() ? parseRankingsFromSnapshot(snap.data()) : []
+        setSelectedGroupRankings(parsed)
         setGroupRankingsLoadedForDate(dateAtSubscribe)
       },
       (err) => {
@@ -1422,7 +1443,7 @@ function App() {
     )
 
     return () => unsub()
-  }, [isAuthenticated, groupId, activeGroupHistoryDate, displayGroupDates])
+  }, [isAuthenticated, groupId, activeGroupHistoryDate, historyPickerDates, groupLeaderboardDates])
 
   const handleJoinCrew = async () => {
     setWelcomeError('')
@@ -1905,21 +1926,14 @@ function App() {
                 hydrated={groupHistoryHydrated}
               />
 
-              <GroupRankingsLog
-                title="Yesterday · full log"
-                subtitle={ymdToDisplayLabel(yesterdayYMD)}
-                rankings={displayYesterdayRankings}
-                hydrated={groupHistoryHydrated}
-                emptyMessage="No standings for yesterday yet."
-              />
-
               <GroupHistoryLeaderboardPanel
-                dates={displayGroupDates}
-                selectedDate={selectedGroupHistoryDate}
+                dates={historyPickerDates}
+                selectedDate={activeGroupHistoryDate}
                 onSelectDate={setSelectedGroupHistoryDate}
                 rankings={displaySelectedGroupRankings}
                 groupName={groupDisplayName}
                 hydrated={groupHistoryHydrated}
+                loading={historyRankingsLoading}
               />
             </div>
           )}

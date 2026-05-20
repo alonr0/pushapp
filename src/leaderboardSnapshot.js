@@ -108,6 +108,22 @@ function scoreForCrewMember(member, dateYMD) {
   return 0
 }
 
+function memberHasScoreForDate(member, dateYMD) {
+  if ((member?.history ?? []).some((h) => h?.date === dateYMD)) return true
+  const last = lastUpdatedToDate(member?.lastUpdated)
+  return Boolean(last && formatLocalYMD(last) === dateYMD)
+}
+
+function rankingsEqual(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]
+    const y = b[i]
+    if (x.name !== y.name || x.score !== y.score || x.rank !== y.rank) return false
+  }
+  return true
+}
+
 /** Build standings for a day from loaded crew rows (history + today). */
 export function buildRankingsFromCrewMembers(members, dateYMD) {
   if (!isValidArchiveDateYMD(dateYMD)) return []
@@ -134,7 +150,14 @@ export function buildFullGroupRankingsForDate(members, dateYMD, snapshotRankings
   for (const m of members) {
     const name = typeof m?.name === 'string' && m.name.trim() ? m.name.trim() : 'Unknown'
     const key = name.toLowerCase()
-    const score = scoreByName.has(key) ? scoreByName.get(key) : scoreForCrewMember(m, dateYMD)
+    const crewScore = scoreForCrewMember(m, dateYMD)
+    const snapScore = scoreByName.get(key)
+    // Live crew history wins when present; snapshot fills gaps only (avoids stale docs).
+    const score = memberHasScoreForDate(m, dateYMD)
+      ? crewScore
+      : snapScore !== undefined
+        ? snapScore
+        : crewScore
     entries.push({ name, score })
   }
   return assignCompetitionRanks(entries).map(({ name, score, rank }) => ({ name, score, rank }))
@@ -358,12 +381,96 @@ export async function backfillGroupDailyLeaderboards(groupId, options = {}) {
 }
 
 /**
- * Creates yesterday's group snapshot if missing. Run before per-user lazy reset.
- * Returns parsed rankings (public fields only).
+ * Keeps a day's snapshot aligned with user docs; awards podiums once per day.
+ * @returns {{ status: string, rankings: Array }}
+ */
+export async function syncGroupSnapshotForDate(groupId, dateYMD, options = {}) {
+  const { awardPodiums = false, includeZeroScores = false } = options
+  const gid = groupId.trim().toLowerCase()
+  if (!gid || !isValidArchiveDateYMD(dateYMD)) {
+    return { status: 'invalid', rankings: [] }
+  }
+
+  const snapRef = snapshotRef(gid, dateYMD)
+  const userDocs = await loadGroupUserDocs(gid)
+  const { ranked, publicRankings } = buildRankedEntriesForDate(userDocs, dateYMD, {
+    includeZeroScores,
+  })
+  if (publicRankings.length === 0) {
+    return { status: 'empty', rankings: [] }
+  }
+
+  const existingSnap = await getDoc(snapRef)
+  const existingData = existingSnap.exists() ? existingSnap.data() : null
+  const existingRankings = parseRankingsFromSnapshot(existingData)
+  const podiumsAlreadyAwarded = existingData?.podiumsAwarded === true
+  const isCreate = !existingSnap.exists()
+  const needsRankingUpdate = isCreate || !rankingsEqual(existingRankings, publicRankings)
+  const shouldAwardPodiums =
+    awardPodiums && !podiumsAlreadyAwarded && (isCreate || needsRankingUpdate)
+  const shouldMarkLegacyAwarded =
+    awardPodiums && !podiumsAlreadyAwarded && !isCreate && !needsRankingUpdate
+
+  if (!needsRankingUpdate && !shouldAwardPodiums && !shouldMarkLegacyAwarded) {
+    return { status: 'exists', rankings: existingRankings }
+  }
+
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(snapRef)
+    const snapData = snap.exists() ? snap.data() : null
+    const alreadyAwarded = snapData?.podiumsAwarded === true
+    const podiumEntries =
+      shouldAwardPodiums && !alreadyAwarded ? ranked.filter((r) => r.rank <= 3) : []
+    const userRefs = podiumEntries.map((r) => doc(db, 'users', r.userId))
+    const userSnaps =
+      podiumEntries.length > 0
+        ? await Promise.all(userRefs.map((ref) => transaction.get(ref)))
+        : []
+
+    if (snap.exists()) {
+      transaction.update(snapRef, {
+        date: dateYMD,
+        rankings: publicRankings,
+        updatedAt: serverTimestamp(),
+        ...((shouldAwardPodiums || shouldMarkLegacyAwarded) && !alreadyAwarded
+          ? { podiumsAwarded: true }
+          : {}),
+      })
+    } else {
+      transaction.set(snapRef, {
+        date: dateYMD,
+        rankings: publicRankings,
+        createdAt: serverTimestamp(),
+        podiumsAwarded: shouldAwardPodiums,
+      })
+    }
+
+    if (!shouldAwardPodiums || alreadyAwarded) return
+
+    for (let i = 0; i < podiumEntries.length; i++) {
+      const { userId, rank } = podiumEntries[i]
+      const userSnap = userSnaps[i]
+      if (!userSnap.exists()) continue
+
+      const field =
+        rank === 1 ? 'podiums.first' : rank === 2 ? 'podiums.second' : 'podiums.third'
+      transaction.update(doc(db, 'users', userId), {
+        [field]: increment(1),
+      })
+    }
+  })
+
+  const after = await getDoc(snapRef)
+  const status = isCreate ? 'created' : needsRankingUpdate ? 'updated' : 'podiums_marked'
+  return { status, rankings: parseRankingsFromSnapshot(after.data()) }
+}
+
+/**
+ * Syncs yesterday from current user data and awards podiums if not yet recorded.
  */
 export async function ensureYesterdayGroupSnapshot(groupId) {
   const yesterday = getYesterdayYMD()
-  const result = await ensureGroupSnapshotForDate(groupId, yesterday, {
+  const result = await syncGroupSnapshotForDate(groupId, yesterday, {
     awardPodiums: true,
     includeZeroScores: true,
   })

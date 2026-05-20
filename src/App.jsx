@@ -25,7 +25,6 @@ import { db } from './firebase'
 import {
   assignCompetitionRanks,
   buildFullGroupRankingsForDate,
-  buildRankingsFromCrewMembers,
   DEFAULT_PODIUMS,
   discoverGroupArchiveDates,
   filterLeaderboardHistoryDates,
@@ -1132,10 +1131,11 @@ function App() {
     const date = activeGroupHistoryDate
     if (!date) return []
 
-    const hasSnapshotDoc = groupLeaderboardDates.includes(date)
-    const firestore =
-      hasSnapshotDoc && groupRankingsLoadedForDate === date ? selectedGroupRankings : []
-    const rows = firestore.length > 0 ? firestore : buildRankingsFromCrewMembers(leaderboardRows, date)
+    const snapshot =
+      groupLeaderboardDates.includes(date) && groupRankingsLoadedForDate === date
+        ? selectedGroupRankings
+        : []
+    const rows = buildFullGroupRankingsForDate(leaderboardRows, date, snapshot)
 
     return enrichRankingsWithPodiums(rows, leaderboardRows)
   }, [
@@ -1185,36 +1185,17 @@ function App() {
   }, [isAuthenticated, username, groupId])
 
   useEffect(() => {
-    if (!isAuthenticated || !groupId) return undefined
-
-    let cancelled = false
-    ;(async () => {
-      try {
-        await ensureYesterdayGroupSnapshot(groupId)
-      } catch (e) {
-        console.error(e)
-        if (!cancelled) {
-          setSyncError('Could not finalize yesterday\'s group standings. Check Firestore rules.')
-        }
-      }
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [isAuthenticated, groupId, activeTab])
-
-  useEffect(() => {
     if (!isAuthenticated || !userDocId || !groupId) return undefined
 
     let cancelled = false
     ;(async () => {
       try {
         await applyLazyMidnightResetIfNeeded(userDocId)
+        await ensureYesterdayGroupSnapshot(groupId)
       } catch (e) {
         console.error(e)
         if (!cancelled) {
-          setSyncError('Could not apply day rollover. Check Firestore rules and try again.')
+          setSyncError('Could not apply day rollover or sync standings. Check Firestore rules.')
         }
       }
     })()
@@ -1223,6 +1204,21 @@ function App() {
       cancelled = true
     }
   }, [isAuthenticated, userDocId, groupId, activeTab])
+
+  /** Re-sync yesterday snapshot when any crew member's history changes (late resets, retro edits). */
+  useEffect(() => {
+    if (!isAuthenticated || !groupId || !leaderboardHydrated) return undefined
+
+    const timer = setTimeout(async () => {
+      try {
+        await ensureYesterdayGroupSnapshot(groupId)
+      } catch (e) {
+        console.error(e)
+      }
+    }, 400)
+
+    return () => clearTimeout(timer)
+  }, [isAuthenticated, groupId, leaderboardHydrated, leaderboardRows, yesterdayYMD])
 
   useEffect(() => {
     if (!isAuthenticated || !groupId) return undefined

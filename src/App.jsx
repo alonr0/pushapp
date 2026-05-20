@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   Area,
   AreaChart,
@@ -29,11 +29,18 @@ import {
   discoverGroupArchiveDates,
   filterLeaderboardHistoryDates,
   ensureYesterdayGroupSnapshot,
+  formatLocalYMD,
   getYesterdayYMD,
+  lastUpdatedToDate,
   parsePodiums,
   parseRankingsFromSnapshot,
   ymdToDisplayLabel,
 } from './leaderboardSnapshot'
+import {
+  formatYesterdayShareText,
+  shareStandingsImage,
+  shareTextMessage,
+} from './shareStandings'
 
 const LOGO_SRC = '/logo.png'
 
@@ -66,20 +73,6 @@ function toUserDocumentId(displayName, groupId) {
   const g = normalizeGroupCode(groupId).replace(/[/:]/g, '-')
   const n = toUserDocId(displayName).replace(/[/:]/g, '-')
   return `${g}::${n}`
-}
-
-function formatLocalYMD(d) {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-}
-
-function lastUpdatedToDate(ts) {
-  if (!ts) return null
-  if (typeof ts.toDate === 'function') return ts.toDate()
-  if (ts instanceof Date) return ts
-  return null
 }
 
 function isSameLocalCalendarDay(a, b) {
@@ -202,6 +195,11 @@ function effectiveDailyCount(data) {
   const now = new Date()
   if (!isSameLocalCalendarDay(last, now)) return 0
   return raw
+}
+
+/** Today's reps from Firestore user doc (same rules as effectiveDailyCount). */
+function todayDailyFromUserDoc(data) {
+  return Math.max(0, Math.floor(effectiveDailyCount(data)))
 }
 
 /** Highest reps logged on a single day (archived history + today). */
@@ -371,51 +369,232 @@ function WelcomeScreen({
   )
 }
 
-function ProgressRing({ current, goal }) {
+const QUICK_ADD_AMOUNTS = [5, 10, 20, 50]
+
+function progressPercent(current, goal) {
   const safeGoal = Math.max(goal, 1)
-  const pct = Math.min(current / safeGoal, 1)
+  return Math.round((current / safeGoal) * 100)
+}
+
+function ProgressRing({ current, goal }) {
+  const pctLabel = progressPercent(current, goal)
+  const ringFill = Math.min(pctLabel / 100, 1)
   const radius = 44
   const circumference = 2 * Math.PI * radius
-  const dashOffset = circumference * (1 - pct)
+  const dashOffset = circumference * (1 - ringFill)
+  const gradId = useId().replace(/:/g, '')
 
   return (
-    <div className="relative flex h-40 w-40 shrink-0 items-center justify-center">
-      <svg className="h-full w-full -rotate-90" viewBox="0 0 100 100" aria-hidden>
-        <circle
-          cx="50"
-          cy="50"
-          r={radius}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="8"
-          className="text-slate-800"
-        />
-        <circle
-          cx="50"
-          cy="50"
-          r={radius}
-          fill="none"
-          stroke="url(#ringGradientDash)"
-          strokeWidth="8"
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={dashOffset}
-          className="transition-[stroke-dashoffset] duration-500 ease-out"
-        />
-        <defs>
-          <linearGradient id="ringGradientDash" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#34d399" />
-            <stop offset="100%" stopColor="#3b82f6" />
-          </linearGradient>
-        </defs>
-      </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-        <span className="text-3xl font-bold tabular-nums tracking-tight text-white">
-          {current}
-        </span>
-        <span className="text-xs font-medium text-slate-500">/ {goal} goal</span>
+    <div className="flex flex-col items-center gap-2.5">
+      <div className="relative flex h-44 w-44 shrink-0 items-center justify-center sm:h-48 sm:w-48">
+        <svg className="h-full w-full -rotate-90" viewBox="0 0 100 100" aria-hidden>
+          <defs>
+            <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#34d399" />
+              <stop offset="100%" stopColor="#3b82f6" />
+            </linearGradient>
+          </defs>
+          <circle
+            cx="50"
+            cy="50"
+            r={radius}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="7"
+            className="text-slate-800/90"
+          />
+          <circle
+            cx="50"
+            cy="50"
+            r={radius}
+            fill="none"
+            stroke={`url(#${gradId})`}
+            strokeWidth="7"
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={dashOffset}
+            className="transition-[stroke-dashoffset] duration-500 ease-out"
+          />
+        </svg>
+        <div
+          className="absolute inset-0 flex flex-col items-center justify-center px-3 text-center"
+          aria-label={`${current} of ${goal} goal, ${pctLabel} percent`}
+        >
+          <span className="text-4xl font-bold tabular-nums tracking-tight text-white sm:text-5xl">
+            {current}
+          </span>
+          <span className="mt-1 text-[11px] font-medium tabular-nums text-slate-500 sm:text-xs">
+            <span className="text-slate-600">/</span> {goal} <span className="text-slate-600">goal</span>
+          </span>
+        </div>
       </div>
+      <p className="text-sm font-semibold tabular-nums text-blue-400/95">{pctLabel}%</p>
     </div>
+  )
+}
+
+function EditPencilButton({ onClick, label, disabled }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-800/80 hover:text-slate-300 disabled:pointer-events-none disabled:opacity-40"
+      aria-label={label}
+    >
+      <IconPencil className="h-3.5 w-3.5" />
+    </button>
+  )
+}
+
+function DashboardProgressHub({
+  todayCount,
+  dailyGoal,
+  hydrated,
+  busy,
+  logError,
+  logInput,
+  onLogInputChange,
+  onLogSubmit,
+  onQuickAdd,
+  onEditReps,
+  onEditGoal,
+}) {
+  const goal = hydrated ? dailyGoal : DEFAULT_DAILY_GOAL
+  const current = hydrated ? todayCount : 0
+  const pctLabel = progressPercent(current, goal)
+  const goalMet = hydrated && current >= goal
+  const remaining = Math.max(0, goal - current)
+
+  return (
+    <section
+      className={`relative overflow-hidden rounded-2xl border border-slate-800/60 bg-slate-900/40 shadow-xl shadow-slate-950/40 backdrop-blur-md ${
+        !hydrated ? 'opacity-90' : ''
+      } ${goalMet ? 'ring-1 ring-blue-500/30' : ''}`}
+      aria-labelledby="progress-heading"
+    >
+      <div
+        className="pointer-events-none absolute inset-0 bg-gradient-to-b from-blue-950/15 via-transparent to-slate-950/50"
+        aria-hidden
+      />
+
+      <div className="relative border-b border-slate-800/60 px-5 py-4">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-blue-400/85">Today</p>
+        <h2 id="progress-heading" className="mt-1 text-sm font-semibold tracking-tight text-slate-200">
+          Daily progress
+        </h2>
+        <p className="mt-1 text-xs text-slate-500">Track today&apos;s reps and hit your personal goal.</p>
+      </div>
+
+      <div className="relative flex flex-col items-center gap-6 px-5 py-7">
+        <ProgressRing current={current} goal={goal} />
+
+        <div className="flex w-full max-w-xs flex-col gap-3 rounded-xl border border-slate-800/50 bg-slate-950/30 px-4 py-3 backdrop-blur-sm">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium uppercase tracking-wider text-slate-500">Today&apos;s reps</span>
+            <span className="flex items-center gap-1.5">
+              <span className="text-lg font-bold tabular-nums text-white">{hydrated ? current : '—'}</span>
+              <EditPencilButton
+                onClick={onEditReps}
+                disabled={!hydrated || busy}
+                label={`Edit today's reps, currently ${current}`}
+              />
+            </span>
+          </div>
+          <div className="h-px bg-slate-800/80" />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium uppercase tracking-wider text-slate-500">Daily goal</span>
+            <span className="flex items-center gap-1.5">
+              <span className="text-lg font-bold tabular-nums text-blue-400/95">{hydrated ? goal : '—'}</span>
+              <EditPencilButton
+                onClick={onEditGoal}
+                disabled={!hydrated || busy}
+                label={`Edit daily goal, currently ${goal}`}
+              />
+            </span>
+          </div>
+        </div>
+
+        <div className="w-full max-w-sm">
+          <p className="mb-2.5 text-center text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">
+            Quick add
+          </p>
+          <div className="flex flex-wrap justify-center gap-2" role="group" aria-label="Quick add pushups">
+            {QUICK_ADD_AMOUNTS.map((amount) => (
+              <button
+                key={amount}
+                type="button"
+                onClick={() => onQuickAdd(amount)}
+                disabled={!hydrated || busy}
+                className="min-w-[3.25rem] rounded-full border border-slate-700/80 bg-slate-800/40 px-4 py-2 text-sm font-semibold tabular-nums text-slate-200 backdrop-blur-sm transition hover:border-blue-500/45 hover:bg-blue-500/10 hover:text-blue-300 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-40"
+              >
+                +{amount}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="w-full max-w-sm border-t border-slate-800/60 pt-5">
+          <label htmlFor="pushup-count" className="text-xs font-medium text-slate-400">
+            Custom amount
+          </label>
+          {logError && (
+            <p className="mt-2 text-xs text-red-400" role="alert">
+              {logError}
+            </p>
+          )}
+          <div className="mt-2 flex gap-2">
+            <input
+              id="pushup-count"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              placeholder="e.g. 15"
+              value={logInput}
+              onChange={onLogInputChange}
+              onKeyDown={(e) => e.key === 'Enter' && !busy && onLogSubmit()}
+              disabled={busy || !hydrated}
+              className="min-h-11 flex-1 rounded-xl border border-slate-700/80 bg-slate-950/50 px-3.5 py-2.5 text-base text-white placeholder:text-slate-600 focus:border-blue-500/60 focus:outline-none focus:ring-2 focus:ring-blue-500/25 disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onClick={onLogSubmit}
+              disabled={busy || !hydrated}
+              className="min-h-11 shrink-0 rounded-xl bg-emerald-500 px-5 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-500/25 transition hover:bg-emerald-400 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+            >
+              {busy ? '…' : 'Add'}
+            </button>
+          </div>
+        </div>
+
+        {goalMet && (
+          <div
+            className="relative w-full max-w-sm overflow-hidden rounded-xl border border-emerald-400/35 bg-gradient-to-r from-emerald-500/20 via-emerald-500/10 to-emerald-600/15 px-4 py-4 text-center shadow-[0_0_28px_-8px_rgba(16,185,129,0.45)]"
+            role="status"
+          >
+            <div
+              className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-emerald-400/10 via-emerald-500/5 to-emerald-400/10"
+              aria-hidden
+            />
+            <p className="relative text-sm font-bold uppercase tracking-[0.18em] text-emerald-300">
+              Goal crushed
+            </p>
+            <p className="relative mt-1.5 text-xs font-medium text-emerald-400/95">
+              {pctLabel}% complete — you&apos;re on fire today.
+            </p>
+          </div>
+        )}
+
+        {hydrated && !goalMet && (
+          <p className="text-center text-xs text-slate-500">
+            <span className="font-semibold tabular-nums text-blue-400/90">{remaining}</span> pushups to hit your goal
+          </p>
+        )}
+        {!hydrated && (
+          <p className="text-center text-xs text-slate-500">Loading your stats…</p>
+        )}
+      </div>
+    </section>
   )
 }
 
@@ -457,7 +636,7 @@ function MicroModal({ title, description, children, onClose }) {
         aria-label="Close dialog overlay"
         onClick={onClose}
       />
-      <div className="relative z-10 w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-2xl shadow-emerald-950/30">
+      <div className="relative z-10 w-full max-w-md rounded-2xl border border-slate-800/60 bg-slate-900/90 p-5 shadow-2xl shadow-slate-950/50 backdrop-blur-md">
         <h3 id="micro-modal-title" className="text-base font-semibold text-white">
           {title}
         </h3>
@@ -668,27 +847,53 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
   )
 }
 
+/** Shared with Dashboard bento icon (Heroicons 24 outline weight). */
+const NAV_ICON_STROKE = {
+  fill: 'none',
+  viewBox: '0 0 24 24',
+  strokeWidth: 1.5,
+  stroke: 'currentColor',
+  strokeLinecap: 'round',
+  strokeLinejoin: 'round',
+}
+
+function NavIconSvg({ className, children }) {
+  return (
+    <svg className={className} aria-hidden {...NAV_ICON_STROKE}>
+      {children}
+    </svg>
+  )
+}
+
+/** 4-tile bento / activity grid */
 function NavIconDashboard({ className }) {
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75A2.25 2.25 0 0115.75 18h2.25A2.25 2.25 0 0120.25 15.75v-2.25A2.25 2.25 0 0118 11.25h-2.25a2.25 2.25 0 01-2.25 2.25v2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25z" />
-    </svg>
+    <NavIconSvg className={className}>
+      <path d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75A2.25 2.25 0 0115.75 18h2.25A2.25 2.25 0 0120.25 15.75v-2.25A2.25 2.25 0 0118 11.25h-2.25a2.25 2.25 0 01-2.25 2.25v2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25z" />
+    </NavIconSvg>
   )
 }
 
-function NavIconHistory({ className }) {
+/** Activity ring + minimal athletic profile */
+function NavIconMyStats({ className }) {
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-    </svg>
+    <NavIconSvg className={className}>
+      <circle cx="12" cy="12" r="7.25" />
+      <circle cx="12" cy="10.5" r="2" />
+      <path d="M9 16.75c.75-2 1.75-3.25 3-3.25s2.25 1.25 3 3.25" />
+    </NavIconSvg>
   )
 }
 
-function NavIconTrophy({ className }) {
+/** Minimal 3-tier podium (2nd · 1st · 3rd) */
+function NavIconRankings({ className }) {
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 18.75h-9m9 0a3 3 0 003-3V9a3 3 0 00-3-3h-5.25m5.25 0a3 3 0 00-3-3h-3a3 3 0 00-3 3m6 0V6m-6 0V9a3 3 0 003 3h3a3 3 0 003-3V9m-6 0h6" />
-    </svg>
+    <NavIconSvg className={className}>
+      <path d="M4 19.25h16" />
+      <path d="M6.5 19.25V13.25" />
+      <path d="M11.5 19.25V8.25" />
+      <path d="M16.5 19.25v-4.5" />
+    </NavIconSvg>
   )
 }
 
@@ -712,99 +917,118 @@ function LeaderboardSkeleton({ rows = 5 }) {
 }
 
 function PodiumBadges({ podiums }) {
-  const { first, second, third } = podiums
+  const { first, second, third } = podiums ?? DEFAULT_PODIUMS
   if (first === 0 && second === 0 && third === 0) return null
   return (
-    <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-slate-500">
-      {first > 0 && (
-        <span className="tabular-nums">
-          👑×{first}
-        </span>
-      )}
-      {second > 0 && (
-        <span className="tabular-nums">
-          🥈×{second}
-        </span>
-      )}
-      {third > 0 && (
-        <span className="tabular-nums">
-          🥉×{third}
-        </span>
-      )}
+    <span className="inline-flex shrink-0 flex-wrap items-center justify-end gap-x-1.5 gap-y-0.5 text-[10px] text-slate-500">
+      {first > 0 && <span className="tabular-nums">🥇×{first}</span>}
+      {second > 0 && <span className="tabular-nums">🥈×{second}</span>}
+      {third > 0 && <span className="tabular-nums">🥉×{third}</span>}
     </span>
   )
 }
 
-function AllTimeTotalPodiumCard({ rankings, groupName, hydrated }) {
+/** Display name with lifetime podium counts to the right (consistent across leaderboards). */
+function YourPodiumsDisplay({ podiums }) {
+  const { first, second, third } = podiums ?? DEFAULT_PODIUMS
+  if (first === 0 && second === 0 && third === 0) {
+    return <p className="mt-4 text-center text-sm text-slate-500">No podium finishes yet.</p>
+  }
+  return (
+    <div className="mt-4 flex flex-wrap items-center justify-center gap-8 sm:gap-10">
+      {first > 0 && (
+        <span className="text-2xl font-bold tabular-nums tracking-tight text-yellow-300 sm:text-3xl">
+          🥇 {first}
+        </span>
+      )}
+      {second > 0 && (
+        <span className="text-2xl font-bold tabular-nums tracking-tight text-zinc-200 sm:text-3xl">
+          🥈 {second}
+        </span>
+      )}
+      {third > 0 && (
+        <span className="text-2xl font-bold tabular-nums tracking-tight text-amber-300 sm:text-3xl">
+          🥉 {third}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function yesterdayPodiumRowStyles(rank) {
+  if (rank === 1) {
+    return {
+      row: 'border-yellow-400/55 bg-gradient-to-r from-yellow-400/28 via-amber-400/14 to-slate-900/80',
+      name: 'text-yellow-50',
+      score: 'text-yellow-200',
+    }
+  }
+  if (rank === 2) {
+    return {
+      row: 'border-zinc-200/55 bg-gradient-to-r from-zinc-200/24 via-slate-200/12 to-slate-900/80',
+      name: 'text-zinc-50',
+      score: 'text-zinc-100',
+    }
+  }
+  if (rank === 3) {
+    return {
+      row: 'border-amber-500/50 bg-gradient-to-r from-amber-500/22 via-yellow-600/12 to-slate-900/80',
+      name: 'text-amber-50',
+      score: 'text-amber-200',
+    }
+  }
+  return {
+    row: 'border-slate-800/90 bg-slate-900/60',
+    name: 'text-slate-200',
+    score: 'text-white',
+  }
+}
+
+function NameWithPodiumBadges({ name, podiums, nameClassName = 'min-w-0 truncate font-medium text-slate-200' }) {
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-2">
+      <span className={nameClassName}>{name}</span>
+      <PodiumBadges podiums={podiums} />
+    </span>
+  )
+}
+
+function rankMedal(rank) {
+  if (rank === 1) return '🥇'
+  if (rank === 2) return '🥈'
+  if (rank === 3) return '🥉'
+  return ''
+}
+
+/** Top 3 medal rows + rest list + zero scorers (yesterday / all-time / today). */
+function MedalStandingsList({ rankings, showBestDay = false, alltimeLosers = false, dividerClass = 'border-amber-500/15' }) {
   const top = rankings.filter((r) => r.rank <= 3)
-
-  if (!hydrated) {
-    return (
-      <div className="animate-pulse rounded-2xl border border-slate-800 bg-slate-900/50 p-6">
-        <div className="h-4 w-40 rounded bg-slate-800" />
-      </div>
-    )
-  }
-
-  if (top.length === 0) {
-    return (
-      <section className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-6 text-center">
-        <p className="text-sm text-slate-500">No all-time totals yet.</p>
-      </section>
-    )
-  }
+  const restScored = rankings.filter((r) => r.rank > 3 && r.score > 0)
+  const zeroScorers = rankings.filter((r) => r.score === 0 && r.rank > 3)
 
   return (
-    <section
-      className="overflow-hidden rounded-2xl border border-violet-500/25 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-950 p-5 shadow-[0_0_40px_-12px_rgba(139,92,246,0.22)]"
-      aria-label="All-time total podium"
-    >
-      <div className="text-center">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-violet-400/90">
-          All-time total
-        </p>
-        <p className="mt-1 text-xs text-slate-500">Lifetime reps in the crew</p>
-        {groupName && (
-          <p className="mt-0.5 truncate text-sm font-semibold text-emerald-400/95">{groupName}</p>
-        )}
-      </div>
-
-      <ul className="mt-5 space-y-2.5">
+    <>
+      <ul className="space-y-2.5">
         {top.map((row) => {
-          const medal =
-            row.rank === 1 ? '🥇' : row.rank === 2 ? '🥈' : row.rank === 3 ? '🥉' : ''
-          const isFirst = row.rank === 1
+          const styles = yesterdayPodiumRowStyles(row.rank)
           return (
             <li
-              key={`alltime-${row.name}-${row.rank}`}
-              className={`flex items-center justify-between rounded-xl border px-4 py-3 ${
-                isFirst
-                  ? 'border-violet-500/40 bg-gradient-to-r from-violet-500/15 to-slate-900/80'
-                  : 'border-slate-800/90 bg-slate-900/60'
-              }`}
+              key={`top-${row.name}-${row.rank}`}
+              className={`flex items-center justify-between rounded-xl border px-4 py-3 ${styles.row}`}
             >
-              <span className="flex min-w-0 items-center gap-2.5">
-                <span className="text-lg" aria-hidden>
-                  {medal}
+              <span className="flex min-w-0 flex-1 items-center gap-2.5">
+                <span className="shrink-0 text-lg" aria-hidden>
+                  {rankMedal(row.rank)}
                 </span>
-                <span className="min-w-0">
-                  <span
-                    className={`block truncate font-semibold ${isFirst ? 'text-violet-100' : 'text-slate-200'}`}
-                  >
-                    {row.name}
-                  </span>
-                  <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
-                </span>
+                <NameWithPodiumBadges
+                  name={row.name}
+                  podiums={row.podiums}
+                  nameClassName={`min-w-0 truncate font-semibold ${styles.name}`}
+                />
               </span>
               <span className="shrink-0 text-right">
-                <span
-                  className={`block tabular-nums text-lg font-bold ${
-                    isFirst ? 'text-violet-300' : 'text-white'
-                  }`}
-                >
-                  {row.score}
-                </span>
-                {row.bestDay > 0 && (
+                <span className={`block tabular-nums text-lg font-bold ${styles.score}`}>{row.score}</span>
+                {showBestDay && row.bestDay > 0 && (
                   <span className="mt-0.5 block text-[11px] tabular-nums text-slate-500">
                     best day {row.bestDay}
                   </span>
@@ -814,13 +1038,190 @@ function AllTimeTotalPodiumCard({ rankings, groupName, hydrated }) {
           )
         })}
       </ul>
+
+      {restScored.length > 0 && (
+        <>
+          <div className={`my-4 border-t ${dividerClass}`} />
+          <ul className="space-y-2">
+            {restScored.map((row) => (
+              <li
+                key={`rest-${row.name}-${row.rank}`}
+                className="flex items-center justify-between rounded-xl border border-slate-800/90 bg-slate-900/50 px-3 py-2.5"
+              >
+                <div className="flex min-w-0 flex-1 items-center gap-3">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-400">
+                    {row.rank}
+                  </span>
+                  <NameWithPodiumBadges name={row.name} podiums={row.podiums} />
+                </div>
+                <span className="shrink-0 text-right">
+                  <span className="block tabular-nums text-sm font-semibold text-white">{row.score}</span>
+                  {showBestDay && row.bestDay > 0 && (
+                    <span className="mt-0.5 block text-[10px] tabular-nums text-slate-500">
+                      best {row.bestDay}
+                    </span>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {zeroScorers.length > 0 && (
+        <>
+          <div className={`my-4 border-t ${alltimeLosers ? 'border-red-500/20' : dividerClass}`} />
+          <p
+            className={`mb-3 text-center text-[10px] font-semibold uppercase tracking-[0.18em] ${
+              alltimeLosers ? 'text-red-400/95' : 'text-slate-500'
+            }`}
+          >
+            {alltimeLosers ? 'All-time losers' : 'LOSERS:'}
+          </p>
+          <ul className="space-y-2">
+            {zeroScorers.map((row) => (
+              <li
+                key={`zero-${row.name}-${row.rank}`}
+                className={
+                  alltimeLosers
+                    ? 'flex items-center justify-between rounded-xl border border-red-500/40 bg-gradient-to-r from-red-950/45 to-slate-900/80 px-4 py-3'
+                    : 'flex items-center justify-between rounded-xl border border-slate-800/90 bg-slate-900/50 px-3 py-2.5'
+                }
+              >
+                {alltimeLosers ? (
+                  <>
+                    <span className="flex min-w-0 flex-1 items-center gap-2.5">
+                      <span
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-red-500/35 bg-red-950/60 text-base font-bold tabular-nums text-red-400"
+                        aria-hidden
+                      >
+                        {row.rank}
+                      </span>
+                      <NameWithPodiumBadges
+                        name={row.name}
+                        podiums={row.podiums}
+                        nameClassName="min-w-0 truncate font-semibold text-red-200"
+                      />
+                    </span>
+                    <span className="shrink-0 tabular-nums text-lg font-bold text-red-400">0</span>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
+                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-400">
+                        {row.rank}
+                      </span>
+                      <NameWithPodiumBadges name={row.name} podiums={row.podiums} />
+                    </div>
+                    <span className="shrink-0 tabular-nums text-sm font-semibold text-slate-500">0</span>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </>
+  )
+}
+
+function AllTimeTotalPodiumCard({ rankings, groupName, hydrated }) {
+  if (!hydrated) {
+    return (
+      <div className="animate-pulse rounded-2xl border border-slate-800 bg-slate-900/50 p-6">
+        <div className="h-4 w-40 rounded bg-slate-800" />
+      </div>
+    )
+  }
+
+  if (rankings.length === 0) {
+    return (
+      <section className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-6 text-center">
+        <p className="text-sm text-slate-500">No crew members yet.</p>
+      </section>
+    )
+  }
+
+  return (
+    <section
+      className="overflow-hidden rounded-2xl border border-violet-500/25 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-950 p-5 shadow-[0_0_40px_-12px_rgba(139,92,246,0.22)]"
+      aria-label="All-time rankings"
+    >
+      <div className="text-center">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-violet-400/90">
+          All-time rankings
+        </p>
+        <p className="mt-1 text-xs text-slate-500">Lifetime standings in the crew</p>
+        {groupName && (
+          <p className="mt-0.5 truncate text-sm font-semibold text-emerald-400/95">{groupName}</p>
+        )}
+      </div>
+      <div className="mt-5">
+        <MedalStandingsList rankings={rankings} showBestDay alltimeLosers dividerClass="border-violet-500/15" />
+      </div>
     </section>
   )
 }
 
+function ShareIcon({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.935-2.186 2.25 2.25 0 00-3.935 2.186z"
+      />
+    </svg>
+  )
+}
+
 function YesterdayStandingsCard({ rankings, groupName, dateYMD, hydrated }) {
-  const top = rankings.filter((r) => r.rank <= 3)
   const dateLabel = ymdToDisplayLabel(dateYMD)
+  const captureRef = useRef(null)
+  const [shareBusy, setShareBusy] = useState(null)
+  const [shareFeedback, setShareFeedback] = useState('')
+
+  const handleShareText = async () => {
+    setShareBusy('text')
+    setShareFeedback('')
+    try {
+      const text = formatYesterdayShareText({ rankings, groupName, dateLabel })
+      const result = await shareTextMessage(text)
+      if (result.method === 'cancelled') return
+      if (result.method === 'whatsapp_clipboard') {
+        setShareFeedback('WhatsApp opened — message copied to clipboard too.')
+      } else if (result.method === 'whatsapp') {
+        setShareFeedback('WhatsApp opened with your standings.')
+      } else {
+        setShareFeedback('Shared.')
+      }
+    } catch (e) {
+      console.error(e)
+      setShareFeedback('Could not share text. Try again.')
+    } finally {
+      setShareBusy(null)
+    }
+  }
+
+  const handleShareImage = async () => {
+    setShareBusy('image')
+    setShareFeedback('')
+    try {
+      const safeDate = dateYMD || 'standings'
+      const result = await shareStandingsImage(captureRef.current, `pushapp-${safeDate}.png`)
+      if (result.method === 'cancelled') return
+      if (result.method === 'download') {
+        setShareFeedback('Image saved — attach it in WhatsApp (or use Share again on mobile).')
+      } else {
+        setShareFeedback('Image shared.')
+      }
+    } catch (e) {
+      console.error(e)
+      setShareFeedback('Could not create image. Try text share.')
+    } finally {
+      setShareBusy(null)
+    }
+  }
 
   if (!hydrated) {
     return (
@@ -833,93 +1234,66 @@ function YesterdayStandingsCard({ rankings, groupName, dateYMD, hydrated }) {
   if (rankings.length === 0) {
     return (
       <section className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-6 text-center">
-        <p className="text-sm text-slate-500">No standings for yesterday yet.</p>
+        <p className="text-sm text-slate-500">No results for yesterday yet.</p>
       </section>
     )
   }
 
+  const shareBtnClass =
+    'inline-flex min-h-10 flex-1 items-center justify-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800/80 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-amber-500/40 hover:bg-slate-800 disabled:opacity-50'
+
   return (
     <section
-      className="overflow-hidden rounded-2xl border border-amber-500/25 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-950 p-5 shadow-[0_0_40px_-12px_rgba(251,191,36,0.25)]"
-      aria-label="Yesterday's standings"
+      className="overflow-hidden rounded-2xl border border-amber-500/25 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-950 shadow-[0_0_40px_-12px_rgba(251,191,36,0.25)]"
+      aria-label="Yesterday results"
     >
-      <div className="text-center">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-amber-400/90">
-          Yesterday&apos;s standings
-        </p>
-        <p className="mt-1 text-xs text-slate-500">{dateLabel}</p>
-        {groupName && (
-          <p className="mt-0.5 truncate text-sm font-semibold text-emerald-400/95">{groupName}</p>
-        )}
+      <div ref={captureRef} className="bg-gradient-to-b from-slate-900 via-slate-950 to-slate-950 p-5">
+        <div className="text-center">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-amber-400/90">
+            Yesterday results
+          </p>
+          <p className="mt-1 text-xs text-slate-500">{dateLabel}</p>
+          {groupName && (
+            <p className="mt-0.5 truncate text-sm font-semibold text-emerald-400/95">{groupName}</p>
+          )}
+        </div>
+        <div className="mt-5">
+          <MedalStandingsList rankings={rankings} />
+        </div>
       </div>
 
-      <ul className="mt-5 space-y-2.5">
-        {top.map((row) => {
-          const medal =
-            row.rank === 1 ? '🥇' : row.rank === 2 ? '🥈' : row.rank === 3 ? '🥉' : ''
-          const isFirst = row.rank === 1
-          return (
-            <li
-              key={`podium-${row.name}-${row.rank}`}
-              className={`flex items-center justify-between rounded-xl border px-4 py-3 ${
-                isFirst
-                  ? 'border-amber-500/40 bg-gradient-to-r from-amber-500/15 to-slate-900/80'
-                  : 'border-slate-800/90 bg-slate-900/60'
-              }`}
-            >
-              <span className="flex min-w-0 items-center gap-2.5">
-                <span className="text-lg" aria-hidden>
-                  {medal}
-                </span>
-                <span
-                  className={`truncate font-semibold ${isFirst ? 'text-amber-100' : 'text-slate-200'}`}
-                >
-                  {row.name}
-                </span>
-              </span>
-              <span
-                className={`shrink-0 tabular-nums text-lg font-bold ${
-                  isFirst ? 'text-amber-300' : 'text-white'
-                }`}
-              >
-                {row.score}
-              </span>
-            </li>
-          )
-        })}
-      </ul>
-
-      {rankings.length > top.length && (
-        <>
-          <div className="my-4 border-t border-amber-500/15" />
-          <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-slate-500">
-            LOSERS:
+      <div className="border-t border-amber-500/15 bg-slate-950/80 px-4 py-3">
+        <p className="mb-2 text-center text-[10px] font-medium uppercase tracking-wider text-slate-500">
+          Share
+        </p>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className={shareBtnClass}
+            disabled={Boolean(shareBusy)}
+            onClick={handleShareText}
+          >
+            <ShareIcon className="h-4 w-4 shrink-0 text-amber-400/90" />
+            {shareBusy === 'text' ? '…' : 'Text'}
+          </button>
+          <button
+            type="button"
+            className={shareBtnClass}
+            disabled={Boolean(shareBusy)}
+            onClick={handleShareImage}
+          >
+            <ShareIcon className="h-4 w-4 shrink-0 text-amber-400/90" />
+            {shareBusy === 'image' ? '…' : 'Image'}
+          </button>
+        </div>
+        {shareFeedback ? (
+          <p className="mt-2 text-center text-[11px] leading-snug text-slate-500">{shareFeedback}</p>
+        ) : (
+          <p className="mt-2 text-center text-[10px] text-slate-600">
+            Text opens WhatsApp with the list. Image uses your phone&apos;s share sheet when available.
           </p>
-          <ul className="space-y-2">
-            {rankings
-              .filter((row) => row.rank > 3)
-              .map((row) => (
-                <li
-                  key={`full-${row.name}-${row.rank}-${row.score}`}
-                  className="flex items-center justify-between rounded-xl border border-slate-800/90 bg-slate-900/50 px-3 py-2.5"
-                >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-400">
-                      {row.rank}
-                    </span>
-                    <div className="min-w-0">
-                      <span className="block truncate font-medium text-slate-200">{row.name}</span>
-                      <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
-                    </div>
-                  </div>
-                  <span className="shrink-0 tabular-nums text-sm font-semibold text-white">
-                    {row.score}
-                  </span>
-                </li>
-              ))}
-          </ul>
-        </>
-      )}
+        )}
+      </div>
     </section>
   )
 }
@@ -979,25 +1353,20 @@ function GroupHistoryLeaderboardPanel({
         <div className="mt-4">
           <LeaderboardSkeleton rows={5} />
         </div>
+      ) : rankings.length === 0 ? (
+        <p className="mt-6 text-center text-sm text-slate-500">No scores that day.</p>
       ) : (
-      <ul className="mt-4 divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-800/30">
-        {rankings.length === 0 ? (
-          <li className="px-4 py-6 text-center text-sm text-slate-500">No scores that day.</li>
-        ) : (
-          rankings.map((row) => (
+        <ul className="mt-4 divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-800/30">
+          {rankings.map((row) => (
             <li key={`${selectedDate}-${row.name}-${row.rank}`} className="flex items-center justify-between px-4 py-3">
               <span className="flex min-w-0 items-center gap-3 text-sm">
                 <span className="w-6 shrink-0 tabular-nums text-slate-500">{row.rank}.</span>
-                <span className="min-w-0">
-                  <span className="block truncate font-medium text-slate-200">{row.name}</span>
-                  <PodiumBadges podiums={row.podiums ?? DEFAULT_PODIUMS} />
-                </span>
+                <NameWithPodiumBadges name={row.name} podiums={row.podiums} />
               </span>
               <span className="shrink-0 tabular-nums text-sm font-semibold text-blue-400">{row.score}</span>
             </li>
-          ))
-        )}
-      </ul>
+          ))}
+        </ul>
       )}
     </section>
   )
@@ -1005,8 +1374,8 @@ function GroupHistoryLeaderboardPanel({
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', Icon: NavIconDashboard },
-  { id: 'history', label: 'History', Icon: NavIconHistory },
-  { id: 'leaderboard', label: 'Leaderboard', Icon: NavIconTrophy },
+  { id: 'stats', label: 'My stats', Icon: NavIconMyStats },
+  { id: 'leaderboard', label: 'Leaderboard', Icon: NavIconRankings },
 ]
 
 async function ensureUserDocument(displayName, groupIdNorm) {
@@ -1088,6 +1457,16 @@ function App() {
     )
   }, [leaderboardRows])
 
+  const displayTodayRankings = useMemo(() => {
+    const entries = leaderboardRows.map((m) => ({
+      name: m.name,
+      score: m.today ?? 0,
+      podiums: m.podiums ?? DEFAULT_PODIUMS,
+      isYou: m.isYou,
+    }))
+    return assignCompetitionRanks(entries)
+  }, [leaderboardRows])
+
   const discoveredArchiveDates = useMemo(
     () => discoverGroupArchiveDates(groupLeaderboardDates, leaderboardRows),
     [groupLeaderboardDates, leaderboardRows],
@@ -1111,14 +1490,12 @@ function App() {
   }, [yesterdayRankings, leaderboardRows, yesterdayYMD])
 
   const allTimeTotalRankings = useMemo(() => {
-    const entries = leaderboardRows
-      .map((m) => ({
-        name: m.name,
-        score: m.totalCount ?? 0,
-        bestDay: bestDailyCountForMember(m),
-        podiums: m.podiums ?? DEFAULT_PODIUMS,
-      }))
-      .filter((e) => e.score > 0)
+    const entries = leaderboardRows.map((m) => ({
+      name: m.name,
+      score: m.totalCount ?? 0,
+      bestDay: bestDailyCountForMember(m),
+      podiums: m.podiums ?? DEFAULT_PODIUMS,
+    }))
     return assignCompetitionRanks(entries)
   }, [leaderboardRows])
 
@@ -1163,8 +1540,6 @@ function App() {
     () => fillHistoryGapsForAnalytics(myHistory, myDailyGoal),
     [myHistory, myDailyGoal],
   )
-
-  const pctBar = Math.min((todayCount / Math.max(myDailyGoal, 1)) * 100, 100)
 
   useEffect(() => {
     if (!isAuthenticated || !username.trim() || !groupId) return undefined
@@ -1459,6 +1834,34 @@ function App() {
     }
   }
 
+  const applyPushupDelta = async (n, { clearLogInput = false } = {}) => {
+    if (!Number.isFinite(n) || n <= 0 || !userDocId) return
+
+    setLogError('')
+    setIsLoggingPushups(true)
+    const ref = doc(db, 'users', userDocId)
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const snap = await transaction.get(ref)
+        if (!snap.exists()) throw new Error('User document missing')
+        const data = snap.data()
+        const daily = todayDailyFromUserDoc(data)
+        transaction.update(ref, {
+          dailyCount: daily + n,
+          totalCount: increment(n),
+          lastUpdated: serverTimestamp(),
+        })
+      })
+      if (clearLogInput) setLogInput('')
+    } catch (e) {
+      console.error(e)
+      setLogError('Update failed. Try again.')
+    } finally {
+      setIsLoggingPushups(false)
+    }
+  }
+
   const saveFixedDaily = async () => {
     const newDaily = Number.parseInt(fixDraft, 10)
     if (!Number.isFinite(newDaily) || newDaily < 0 || !userDocId) return
@@ -1470,16 +1873,11 @@ function App() {
         const snap = await transaction.get(ref)
         if (!snap.exists()) throw new Error('User document missing')
         const data = snap.data()
-        const last = lastUpdatedToDate(data.lastUpdated)
-        const now = new Date()
-        let currentDaily = Number(data.dailyCount) || 0
-        if (!last || !isSameLocalCalendarDay(last, now)) {
-          currentDaily = 0
-        }
+        const currentDaily = todayDailyFromUserDoc(data)
         const delta = newDaily - currentDaily
         transaction.update(ref, {
           dailyCount: newDaily,
-          totalCount: Math.max(0, (Number(data.totalCount) || 0) + delta),
+          totalCount: Math.max(0, Math.floor(Number(data.totalCount) || 0) + delta),
           lastUpdated: serverTimestamp(),
         })
       })
@@ -1494,38 +1892,11 @@ function App() {
 
   const logPushups = async () => {
     const n = Number.parseInt(logInput, 10)
-    if (!Number.isFinite(n) || n <= 0 || !userDocId) return
+    await applyPushupDelta(n, { clearLogInput: true })
+  }
 
-    setLogError('')
-    setIsLoggingPushups(true)
-    const ref = doc(db, 'users', userDocId)
-
-    try {
-      await runTransaction(db, async (transaction) => {
-        const snap = await transaction.get(ref)
-        if (!snap.exists()) {
-          throw new Error('User document missing')
-        }
-        const data = snap.data()
-        const last = lastUpdatedToDate(data.lastUpdated)
-        const now = new Date()
-        let daily = Number(data.dailyCount) || 0
-        if (!last || !isSameLocalCalendarDay(last, now)) {
-          daily = 0
-        }
-        transaction.update(ref, {
-          dailyCount: daily + n,
-          totalCount: increment(n),
-          lastUpdated: serverTimestamp(),
-        })
-      })
-      setLogInput('')
-    } catch (e) {
-      console.error(e)
-      setLogError('Update failed. Try again.')
-    } finally {
-      setIsLoggingPushups(false)
-    }
+  const quickAddPushups = async (amount) => {
+    await applyPushupDelta(amount)
   }
 
   if (!isAuthenticated) {
@@ -1571,8 +1942,8 @@ function App() {
               {groupDisplayName || '\u00A0'}
             </p>
             <p className="text-xs text-slate-500">
-              {activeTab === 'history'
-                ? 'Your training log'
+              {activeTab === 'stats'
+                ? 'Your data · history & podiums'
                 : activeTab === 'leaderboard'
                   ? 'Standings & podiums'
                   : 'Today · live with your crew'}
@@ -1599,191 +1970,72 @@ function App() {
         <main className="flex-1 space-y-5 overflow-y-auto px-4 pb-28">
           {activeTab === 'dashboard' && (
             <>
-              <section
-                className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-5 shadow-xl shadow-slate-950/50 backdrop-blur-sm"
-                aria-labelledby="log-heading"
-              >
-                <div>
-                  <h2 id="log-heading" className="text-sm font-medium text-slate-300">
-                    Log pushups
-                  </h2>
-                  <p className="mt-1 text-xs text-slate-500">Adds to your day — everyone sees it instantly.</p>
-                </div>
-                {logError && (
-                  <p className="mt-3 text-xs text-red-400" role="alert">
-                    {logError}
-                  </p>
-                )}
-                <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-stretch">
-                  <label className="sr-only" htmlFor="pushup-count">
-                    Number of pushups
-                  </label>
-                  <input
-                    id="pushup-count"
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    placeholder="e.g. 15"
-                    value={logInput}
-                    onChange={(e) => setLogInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && !isLoggingPushups && logPushups()}
-                    disabled={isLoggingPushups || !leaderboardHydrated}
-                    className="min-h-12 w-full rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-base text-white placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:opacity-50"
-                  />
-                  <button
-                    type="button"
-                    onClick={logPushups}
-                    disabled={isLoggingPushups || !leaderboardHydrated}
-                    className="min-h-12 shrink-0 rounded-xl bg-emerald-500 px-6 text-base font-semibold text-slate-950 shadow-lg shadow-emerald-500/25 transition hover:bg-emerald-400 active:scale-[0.98] focus-visible:outline focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 disabled:pointer-events-none disabled:opacity-50 sm:px-8"
-                  >
-                    {isLoggingPushups ? 'Saving…' : 'Add to today'}
-                  </button>
-                </div>
-                {leaderboardHydrated && (
-                  <p className="mt-3 text-center text-xs tabular-nums text-slate-500">
-                    Today&apos;s total ·{' '}
-                    <span className="font-semibold text-emerald-400/90">{todayCount}</span>
-                  </p>
-                )}
-              </section>
+              <DashboardProgressHub
+                todayCount={todayCount}
+                dailyGoal={myDailyGoal}
+                hydrated={leaderboardHydrated}
+                busy={isLoggingPushups}
+                logError={logError}
+                logInput={logInput}
+                onLogInputChange={(e) => setLogInput(e.target.value)}
+                onLogSubmit={logPushups}
+                onQuickAdd={quickAddPushups}
+                onEditReps={() => {
+                  setFixDraft(String(todayCount))
+                  setFixModalOpen(true)
+                }}
+                onEditGoal={() => {
+                  setGoalDraft(String(myDailyGoal))
+                  setGoalModalOpen(true)
+                }}
+              />
 
               <section
-                className={`rounded-2xl border border-slate-800/80 bg-slate-900/50 p-5 backdrop-blur-sm ${!leaderboardHydrated ? 'opacity-90' : ''}`}
-                aria-labelledby="progress-heading"
-              >
-                <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="flex min-w-0 flex-1 flex-col items-center lg:items-start">
-                    <div className="flex w-full flex-wrap items-center gap-2">
-                      <h2 id="progress-heading" className="text-sm font-medium text-slate-300">
-                        Daily progress
-                      </h2>
-                      <div className="flex flex-wrap items-center gap-2 lg:ml-auto">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setGoalDraft(String(myDailyGoal))
-                            setGoalModalOpen(true)
-                          }}
-                          disabled={!leaderboardHydrated}
-                          className="inline-flex items-center gap-1 rounded-lg border border-slate-700/90 bg-slate-800/50 px-2 py-0.5 text-[11px] font-semibold text-emerald-400/95 transition hover:border-emerald-500/40 hover:bg-emerald-500/10 disabled:opacity-40"
-                          aria-label="Edit daily goal"
-                        >
-                          <IconPencil className="h-3.5 w-3.5" />
-                          Edit goal
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setFixDraft(String(todayCount))
-                            setFixModalOpen(true)
-                          }}
-                          disabled={!leaderboardHydrated}
-                          className="inline-flex items-center gap-1 rounded-lg border border-slate-700/90 bg-slate-800/50 px-2 py-0.5 text-[11px] font-semibold text-emerald-400/95 transition hover:border-emerald-500/40 hover:bg-emerald-500/10 disabled:opacity-40"
-                          aria-label="Edit today's count"
-                        >
-                          <IconPencil className="h-3.5 w-3.5" />
-                          Edit
-                        </button>
-                      </div>
-                    </div>
-                    <p className="mt-2 max-w-xs text-center text-xs text-slate-500 lg:text-left">
-                      {!leaderboardHydrated
-                        ? 'Loading your stats…'
-                        : todayCount >= myDailyGoal
-                          ? 'Goal crushed — nice work.'
-                          : `${myDailyGoal - todayCount} pushups to hit your goal.`}
-                    </p>
-                  </div>
-                  <ProgressRing
-                    current={leaderboardHydrated ? todayCount : 0}
-                    goal={leaderboardHydrated ? myDailyGoal : DEFAULT_DAILY_GOAL}
-                  />
-                </div>
-                <div className="mt-4 space-y-2">
-                  <div className="flex justify-between text-xs text-slate-500">
-                    <span>Progress bar</span>
-                    <span className="tabular-nums text-slate-400">
-                      {leaderboardHydrated ? `${Math.round(pctBar)}%` : '—'}
-                    </span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-slate-800">
-                    <div
-                      className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-blue-500 transition-[width] duration-500 ease-out"
-                      style={{ width: leaderboardHydrated ? `${pctBar}%` : '0%' }}
-                    />
-                  </div>
-                </div>
-              </section>
-
-              <section
-                className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-5 backdrop-blur-sm"
+                className="relative overflow-hidden rounded-2xl border border-slate-800/60 bg-slate-900/40 p-5 shadow-xl shadow-slate-950/40 backdrop-blur-md"
                 aria-labelledby="friends-heading"
               >
-                <h2 id="friends-heading" className="text-sm font-medium text-slate-300">
-                  Crew · today
-                </h2>
-                <p className="mt-1 text-xs text-slate-500">Live from Firestore — ranked by today&apos;s reps.</p>
-                {!leaderboardHydrated && <LeaderboardSkeleton />}
-                {leaderboardHydrated && rankedFriends.length === 0 && (
-                  <p className="mt-6 text-center text-sm text-slate-500">No one here yet. Invite friends.</p>
-                )}
-                {leaderboardHydrated && rankedFriends.length > 0 && (
-                  <ul className="mt-4 space-y-2">
-                    {rankedFriends.map((friend, index) => (
-                      <li
-                        key={friend.id}
-                        className={`flex items-center justify-between rounded-xl border px-3 py-2.5 ${
-                          friend.isYou
-                            ? 'border-emerald-500/40 bg-emerald-500/10'
-                            : 'border-slate-800 bg-slate-800/40'
-                        }`}
-                      >
-                        <div className="flex min-w-0 items-center gap-3">
-                          <span
-                            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${
-                              index === 0
-                                ? 'bg-amber-500/20 text-amber-400'
-                                : index === 1
-                                  ? 'bg-slate-400/15 text-slate-300'
-                                  : index === 2
-                                    ? 'bg-orange-700/30 text-orange-300'
-                                    : 'bg-slate-800 text-slate-500'
-                            }`}
-                          >
-                            {index + 1}
-                          </span>
-                          <div className="min-w-0">
-                            <span
-                              className={`block truncate font-medium ${friend.isYou ? 'text-emerald-200' : 'text-slate-200'}`}
-                            >
-                              {friend.name}
-                              {friend.isYou && (
-                                <span className="ml-2 text-xs font-normal text-emerald-500/90">(you)</span>
-                              )}
-                            </span>
-                          </div>
-                        </div>
-                        <span className="shrink-0 tabular-nums text-sm font-semibold text-white">
-                          {friend.today}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                <div
+                  className="pointer-events-none absolute inset-0 bg-gradient-to-b from-blue-950/15 via-transparent to-slate-950/50"
+                  aria-hidden
+                />
+                <div className="relative">
+                  <h2 id="friends-heading" className="text-sm font-medium text-slate-300">
+                    Today <span className="text-red-500">·</span>{' '}
+                    <span className="text-red-500">Live</span>
+                  </h2>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Ranked by today&apos;s reps — updates as the crew logs.
+                  </p>
+                  {!leaderboardHydrated && <LeaderboardSkeleton />}
+                  {leaderboardHydrated && displayTodayRankings.length === 0 && (
+                    <p className="mt-6 text-center text-sm text-slate-500">No one here yet. Invite friends.</p>
+                  )}
+                  {leaderboardHydrated && displayTodayRankings.length > 0 && (
+                    <div className="mt-4">
+                      <MedalStandingsList rankings={displayTodayRankings} dividerClass="border-slate-800/60" />
+                    </div>
+                  )}
+                </div>
               </section>
             </>
           )}
 
-          {activeTab === 'history' && (
+          {activeTab === 'stats' && (
             <div className="space-y-4">
               <section className="rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-900/90 via-slate-950/80 to-slate-950 p-5 backdrop-blur-sm">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-500/85">
-                  Analytics
+                  My stats
                 </p>
                 <h2 className="mt-2 text-2xl font-bold tracking-tight text-white">Your progress</h2>
                 <p className="mt-2 max-w-md text-sm leading-relaxed text-slate-500">
-                  Trends from archived days. Full log below.
+                  Personal totals, history, and group podium finishes.
                 </p>
+              </section>
+
+              <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
+                <h2 className="text-sm font-medium text-slate-300">Your podiums</h2>
+                <p className="mt-1 text-xs text-slate-500">1st · 2nd · 3rd place finishes in the group.</p>
+                <YourPodiumsDisplay podiums={myPodiums} />
               </section>
 
               <HistoryAnalyticsView
@@ -1804,28 +2056,27 @@ function App() {
 
           {activeTab === 'leaderboard' && (
             <div className="space-y-4">
-              <section className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
-                <h2 className="text-sm font-medium text-slate-300">Your podiums</h2>
-                <p className="mt-1 text-xs text-slate-500">1st · 2nd · 3rd place finishes in the group.</p>
-                <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <PodiumBadges podiums={myPodiums} />
-                  <span className="text-xs tabular-nums text-slate-500">
-                    🥇 {myPodiums.first} · 🥈 {myPodiums.second} · 🥉 {myPodiums.third}
-                  </span>
-                </div>
+              <section className="rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-900/90 via-slate-950/80 to-slate-950 p-5 backdrop-blur-sm">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-amber-400/85">
+                  Crew rankings
+                </p>
+                <h2 className="mt-2 text-2xl font-bold tracking-tight text-white">Leaderboard</h2>
+                <p className="mt-2 max-w-md text-sm leading-relaxed text-slate-500">
+                  Yesterday&apos;s results, all-time rankings, and past days.
+                </p>
               </section>
-
-              <AllTimeTotalPodiumCard
-                rankings={allTimeTotalRankings}
-                groupName={groupDisplayName}
-                hydrated={leaderboardHydrated}
-              />
 
               <YesterdayStandingsCard
                 rankings={displayYesterdayRankings}
                 groupName={groupDisplayName}
                 dateYMD={yesterdayYMD}
                 hydrated={groupHistoryHydrated}
+              />
+
+              <AllTimeTotalPodiumCard
+                rankings={allTimeTotalRankings}
+                groupName={groupDisplayName}
+                hydrated={leaderboardHydrated}
               />
 
               <GroupHistoryLeaderboardPanel
@@ -1845,7 +2096,7 @@ function App() {
           className="fixed bottom-0 left-0 right-0 z-10 border-t border-slate-800/90 bg-slate-950/90 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-md"
           aria-label="Primary"
         >
-          <div className="mx-auto flex max-w-lg justify-around gap-1">
+          <div className="mx-auto grid max-w-lg grid-cols-3 gap-1">
             {NAV.map(({ id, label, Icon }) => {
               const active = activeTab === id
               return (
@@ -1853,12 +2104,19 @@ function App() {
                   key={id}
                   type="button"
                   onClick={() => setActiveTab(id)}
-                  className={`flex flex-1 flex-col items-center gap-0.5 rounded-xl py-2 text-xs font-medium transition ${
+                  aria-current={active ? 'page' : undefined}
+                  className={`flex flex-col items-center justify-center gap-0.5 rounded-xl py-2 text-xs font-medium transition-colors duration-200 ${
                     active ? 'text-emerald-400' : 'text-slate-500 hover:text-slate-400'
                   }`}
                 >
-                  <Icon className={`h-6 w-6 ${active ? 'text-emerald-400' : ''}`} />
-                  {label}
+                  <span className="flex h-6 w-6 items-center justify-center">
+                    <Icon
+                      className={`h-6 w-6 shrink-0 transition-colors duration-200 ${
+                        active ? 'text-emerald-400' : 'text-current'
+                      }`}
+                    />
+                  </span>
+                  <span className="leading-tight">{label}</span>
                 </button>
               )
             })}
@@ -1867,7 +2125,11 @@ function App() {
       </div>
 
       {goalModalOpen && (
-        <MicroModal title="Goal" onClose={() => !goalSaving && setGoalModalOpen(false)}>
+        <MicroModal
+          title="Daily goal"
+          description="Set how many pushups you want to hit each day."
+          onClose={() => !goalSaving && setGoalModalOpen(false)}
+        >
           <label htmlFor="goal-input" className="sr-only">
             Daily goal
           </label>
@@ -1893,7 +2155,7 @@ function App() {
               type="button"
               onClick={saveDailyGoal}
               disabled={goalSaving}
-              className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+              className="rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-400 disabled:opacity-50"
             >
               {goalSaving ? 'Saving…' : 'Save'}
             </button>
@@ -1902,7 +2164,11 @@ function App() {
       )}
 
       {fixModalOpen && (
-        <MicroModal title="Today" onClose={() => !fixSaving && setFixModalOpen(false)}>
+        <MicroModal
+          title="Today's reps"
+          description="Fix a logging mistake. Your all-time total adjusts by the same amount automatically."
+          onClose={() => !fixSaving && setFixModalOpen(false)}
+        >
           <label htmlFor="fix-input" className="sr-only">
             Today count
           </label>
@@ -1928,7 +2194,7 @@ function App() {
               type="button"
               onClick={saveFixedDaily}
               disabled={fixSaving}
-              className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+              className="rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-400 disabled:opacity-50"
             >
               {fixSaving ? 'Saving…' : 'Save'}
             </button>

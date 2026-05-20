@@ -9,10 +9,12 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "backfill:group": "vite-node scripts/backfill-group.mjs",
-    "retro:day": "vite-node scripts/retro-day.mjs"
+    "retro:day": "vite-node scripts/retro-day.mjs",
+    "recalc:podiums": "vite-node scripts/recalc-podiums.mjs"
   },
   "dependencies": {
     "firebase": "^12.13.0",
+    "html-to-image": "^1.11.13",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "recharts": "^3.8.1"

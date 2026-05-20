@@ -8,6 +8,7 @@ import {
   runTransaction,
   serverTimestamp,
   setDoc,
+  updateDoc,
   where,
 } from 'firebase/firestore'
 import { db } from './firebase'
@@ -25,7 +26,13 @@ export function getYesterdayYMD() {
   return formatLocalYMD(d)
 }
 
-function lastUpdatedToDate(ts) {
+/** True when the calendar day has ended (local time) — podiums may be awarded. */
+export function isClosedCalendarDay(dateYMD) {
+  if (!isValidArchiveDateYMD(dateYMD)) return false
+  return dateYMD < formatLocalYMD(new Date())
+}
+
+export function lastUpdatedToDate(ts) {
   if (!ts) return null
   if (typeof ts.toDate === 'function') return ts.toDate()
   if (ts instanceof Date) return ts
@@ -124,19 +131,6 @@ function rankingsEqual(a, b) {
   return true
 }
 
-/** Build standings for a day from loaded crew rows (history + today). */
-export function buildRankingsFromCrewMembers(members, dateYMD) {
-  if (!isValidArchiveDateYMD(dateYMD)) return []
-  const entries = []
-  for (const m of members) {
-    const score = scoreForCrewMember(m, dateYMD)
-    if (score <= 0) continue
-    const name = typeof m?.name === 'string' && m.name.trim() ? m.name.trim() : 'Unknown'
-    entries.push({ name, score })
-  }
-  return assignCompetitionRanks(entries).map(({ name, score, rank }) => ({ name, score, rank }))
-}
-
 /** Full crew for one day — everyone appears, including 0-rep days (yesterday standings). */
 export function buildFullGroupRankingsForDate(members, dateYMD, snapshotRankings = []) {
   if (!isValidArchiveDateYMD(dateYMD)) return []
@@ -163,7 +157,6 @@ export function buildFullGroupRankingsForDate(members, dateYMD, snapshotRankings
   return assignCompetitionRanks(entries).map(({ name, score, rank }) => ({ name, score, rank }))
 }
 
-/** Union of Firestore snapshot doc ids and dates found in crew history. */
 /** History picker: archived days only (excludes today and yesterday). */
 export function filterLeaderboardHistoryDates(dates, yesterdayYMD) {
   if (!yesterdayYMD) {
@@ -286,7 +279,8 @@ export async function ensureGroupSnapshotForDate(groupId, dateYMD, options = {})
     const snap = await transaction.get(snapRef)
     if (snap.exists()) return
 
-    const podiumEntries = awardPodiums ? ranked.filter((r) => r.rank <= 3) : []
+    const allowAward = awardPodiums && isClosedCalendarDay(dateYMD)
+    const podiumEntries = allowAward ? ranked.filter((r) => r.rank <= 3) : []
     const userRefs = podiumEntries.map((r) => doc(db, 'users', r.userId))
     const userSnaps =
       podiumEntries.length > 0
@@ -297,9 +291,10 @@ export async function ensureGroupSnapshotForDate(groupId, dateYMD, options = {})
       date: dateYMD,
       rankings: publicRankings,
       createdAt: serverTimestamp(),
+      podiumsAwarded: allowAward,
     })
 
-    if (!awardPodiums) return
+    if (!allowAward) return
 
     for (let i = 0; i < podiumEntries.length; i++) {
       const { userId, rank } = podiumEntries[i]
@@ -406,12 +401,10 @@ export async function syncGroupSnapshotForDate(groupId, dateYMD, options = {}) {
   const podiumsAlreadyAwarded = existingData?.podiumsAwarded === true
   const isCreate = !existingSnap.exists()
   const needsRankingUpdate = isCreate || !rankingsEqual(existingRankings, publicRankings)
-  const shouldAwardPodiums =
-    awardPodiums && !podiumsAlreadyAwarded && (isCreate || needsRankingUpdate)
-  const shouldMarkLegacyAwarded =
-    awardPodiums && !podiumsAlreadyAwarded && !isCreate && !needsRankingUpdate
+  const dayClosed = isClosedCalendarDay(dateYMD)
+  const shouldAwardPodiums = awardPodiums && dayClosed && !podiumsAlreadyAwarded
 
-  if (!needsRankingUpdate && !shouldAwardPodiums && !shouldMarkLegacyAwarded) {
+  if (!needsRankingUpdate && !shouldAwardPodiums) {
     return { status: 'exists', rankings: existingRankings }
   }
 
@@ -427,25 +420,25 @@ export async function syncGroupSnapshotForDate(groupId, dateYMD, options = {}) {
         ? await Promise.all(userRefs.map((ref) => transaction.get(ref)))
         : []
 
+    const awardNow = shouldAwardPodiums && !alreadyAwarded
+
     if (snap.exists()) {
       transaction.update(snapRef, {
         date: dateYMD,
         rankings: publicRankings,
         updatedAt: serverTimestamp(),
-        ...((shouldAwardPodiums || shouldMarkLegacyAwarded) && !alreadyAwarded
-          ? { podiumsAwarded: true }
-          : {}),
+        ...(awardNow ? { podiumsAwarded: true } : {}),
       })
     } else {
       transaction.set(snapRef, {
         date: dateYMD,
         rankings: publicRankings,
         createdAt: serverTimestamp(),
-        podiumsAwarded: shouldAwardPodiums,
+        podiumsAwarded: awardNow,
       })
     }
 
-    if (!shouldAwardPodiums || alreadyAwarded) return
+    if (!awardNow) return
 
     for (let i = 0; i < podiumEntries.length; i++) {
       const { userId, rank } = podiumEntries[i]
@@ -475,6 +468,87 @@ export async function ensureYesterdayGroupSnapshot(groupId) {
     includeZeroScores: true,
   })
   return result.rankings
+}
+
+/**
+ * Rebuilds each user's podium counts from closed-day snapshots only (fixes mistaken today awards).
+ */
+export async function recalcGroupPodiumsFromSnapshots(groupId, options = {}) {
+  const { dryRun = false, onProgress } = options
+  const gid = groupId.trim().toLowerCase()
+  const todayYMD = formatLocalYMD(new Date())
+  if (!gid) {
+    return { users: 0, closedDays: [], skippedOpen: [], podiumsByUser: [] }
+  }
+
+  const userDocs = await loadGroupUserDocs(gid)
+  const nameToUserId = new Map()
+  for (const { id, data } of userDocs) {
+    const name = typeof data.name === 'string' && data.name.trim() ? data.name.trim() : id
+    nameToUserId.set(name.toLowerCase(), id)
+  }
+
+  const totals = new Map()
+  for (const { id, data } of userDocs) {
+    totals.set(id, {
+      name: typeof data.name === 'string' ? data.name : id,
+      first: 0,
+      second: 0,
+      third: 0,
+    })
+  }
+
+  const snapDocs = await getDocs(collection(db, 'groups', gid, 'dailyLeaderboards'))
+  const closedDays = []
+  const skippedOpen = []
+  const unmatched = []
+
+  for (const d of snapDocs.docs) {
+    const dateYMD = d.id
+    if (!isClosedCalendarDay(dateYMD)) {
+      skippedOpen.push(dateYMD)
+      onProgress?.(`skip (still open): ${dateYMD}`)
+      continue
+    }
+    closedDays.push(dateYMD)
+    onProgress?.(`count: ${dateYMD}`)
+    const rankings = parseRankingsFromSnapshot(d.data())
+    for (const row of rankings.filter((r) => r.rank <= 3)) {
+      const uid = nameToUserId.get(row.name.trim().toLowerCase())
+      if (!uid) {
+        unmatched.push({ date: dateYMD, name: row.name, rank: row.rank })
+        continue
+      }
+      const t = totals.get(uid)
+      if (row.rank === 1) t.first += 1
+      else if (row.rank === 2) t.second += 1
+      else if (row.rank === 3) t.third += 1
+    }
+  }
+
+  const podiumsByUser = [...totals.entries()].map(([id, t]) => ({
+    userId: id,
+    name: t.name,
+    podiums: { first: t.first, second: t.second, third: t.third },
+  }))
+
+  if (!dryRun) {
+    for (const { userId, podiums } of podiumsByUser) {
+      await updateDoc(doc(db, 'users', userId), { podiums })
+    }
+    for (const dateYMD of closedDays) {
+      await updateDoc(doc(db, 'groups', gid, 'dailyLeaderboards', dateYMD), {
+        podiumsAwarded: true,
+      })
+    }
+    if (skippedOpen.includes(todayYMD)) {
+      await updateDoc(doc(db, 'groups', gid, 'dailyLeaderboards', todayYMD), {
+        podiumsAwarded: false,
+      })
+    }
+  }
+
+  return { users: userDocs.length, closedDays, skippedOpen, unmatched, podiumsByUser, dryRun }
 }
 
 export function ymdToDisplayLabel(ymd) {

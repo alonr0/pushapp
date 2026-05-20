@@ -9,15 +9,15 @@ Mobile-friendly pushup tracker for crews. Log daily reps, hit personal goals, an
 - Progress ring toward your daily goal (editable)
 - Live **Crew · today** ranking
 
-### History
+### My stats
+- **Your podiums** — lifetime 1st / 2nd / 3rd place counts in the group
 - Personal stats in one row: **all-time total**, **daily average** (includes 0-rep rest days), **goal streak**
 - Last-sessions chart (area graph)
 - **By day** timeline with goal reference per entry
 
 ### Leaderboard
-- **Your podiums** — lifetime 1st / 2nd / 3rd place counts in the group
-- **All-time total** — top 3 by lifetime reps (with best single-day count)
-- **Yesterday’s standings** — podium + full list (includes 0-rep members)
+- **Yesterday results** — podium + ranked list; **Share** as text (WhatsApp) or PNG image
+- **All-time rankings** — top 3, rest of crew, and **all-time losers** (0 lifetime reps)
 - **Leaderboard history** — pick any archived day (two or more days ago)
 
 Day rollover archives yesterday’s count into `history`, syncs the group snapshot, and awards podium medals when appropriate.
@@ -28,6 +28,7 @@ Day rollover archives yesterday’s count into `history`, syncs the group snapsh
 - [Tailwind CSS](https://tailwindcss.com/) 4
 - [Firebase](https://firebase.google.com/) Firestore (client SDK)
 - [Recharts](https://recharts.org/) for history charts
+- [html-to-image](https://github.com/bubkoo/html-to-image) for shareable standings images
 
 ## Getting started
 
@@ -63,13 +64,19 @@ Values come from Firebase Console → Project settings → Your apps → Web app
 npm run dev
 ```
 
-Other scripts:
+### Scripts
 
 | Command | Description |
 |--------|-------------|
+| `npm run dev` | Dev server with HMR |
 | `npm run build` | Production build → `dist/` |
 | `npm run preview` | Preview production build |
 | `npm run lint` | ESLint |
+| `npm run backfill:group -- <group-id>` | Backfill missing `dailyLeaderboards` snapshots |
+| `npm run retro:day -- …` | Add or fix one retro day for a member |
+| `npm run recalc:podiums -- <group-id>` | Rebuild podium counts from closed snapshots |
+
+Admin scripts use `.env.local` and run via `vite-node` (see [Admin scripts](#admin-scripts)).
 
 ## Joining a group
 
@@ -115,8 +122,6 @@ Clients need read/write on `users` (by `groupId`), read on `groups`, and create/
 
 ## Admin scripts
 
-Both scripts use `.env.local` and run via `vite-node`.
-
 ### Backfill missing group snapshots
 
 Creates `dailyLeaderboards` docs from crew `history` for dates that have scores but no snapshot yet. Does **not** award retro podiums by default.
@@ -148,19 +153,30 @@ npm run retro:day -- ketty789 אלמוג 2026-05-16 120 100 --dry-run
 
 Date formats: `YYYY-MM-DD`, `DD-MM`, or `DD/MM` (year defaults to current year).
 
+### Fix podium counts (after mistaken today awards)
+
+Rebuilds every member’s `podiums` from **closed** `dailyLeaderboards` only (today is excluded).
+
+```bash
+npm run recalc:podiums -- <group-id>
+npm run recalc:podiums -- ketty789 --dry-run
+```
+
 ## Project structure
 
 ```
 pushapp/
-├── public/              # Static assets, PWA manifest
+├── public/                 # Static assets, PWA manifest, logo
 ├── scripts/
-│   ├── backfill-group.mjs
-│   └── retro-day.mjs
+│   ├── backfill-group.mjs  # Backfill dailyLeaderboards
+│   ├── recalc-podiums.mjs  # Rebuild podium counts
+│   └── retro-day.mjs       # Retro history + snapshot for one day
 ├── src/
-│   ├── App.jsx              # UI, tabs, Firestore listeners
-│   ├── firebase.js          # Firebase init
+│   ├── App.jsx             # UI, tabs, Firestore listeners
+│   ├── firebase.js         # Firebase init
 │   ├── leaderboardSnapshot.js  # Rankings, snapshots, sync, podiums
-│   ├── retroHistory.js      # Retro day upsert helper
+│   ├── retroHistory.js     # Retro day upsert (used by retro-day script)
+│   ├── shareStandings.js   # Yesterday share text / image / WhatsApp
 │   ├── main.jsx
 │   └── index.css
 ├── index.html
@@ -174,7 +190,13 @@ pushapp/
 3. **Live crew data** — Leaderboard UI ranks from user `history` / today when present, not stale snapshot scores.
 4. **Debounced re-sync** — When any group member’s data changes, yesterday’s snapshot is checked again.
 
+Podiums are only incremented for **closed** days (`date < today`). If counts were wrong before that guard, run `npm run recalc:podiums -- <group-id>`.
+
 Open the **Leaderboard** tab after retro edits or backfill so snapshots and medals can catch up.
+
+## Sharing yesterday’s standings
+
+From the Leaderboard tab, **Text** builds a formatted list (medals, ranks, losers) and opens WhatsApp or the native share sheet. **Image** captures the standings card as a PNG (native file share on mobile, download on desktop). Logic lives in `shareStandings.js`.
 
 ## License
 

@@ -45,6 +45,7 @@ import {
   shareStandingsImage,
   shareTextMessage,
 } from './shareStandings'
+import { promptOneSignalNotifications, syncOneSignalGroupTag } from './onesignal'
 
 const LOGO_SRC = '/logo.png'
 
@@ -1800,6 +1801,11 @@ function App() {
     return () => unsub()
   }, [isAuthenticated, groupId, activeGroupHistoryDate, historyPickerDates, groupLeaderboardDates])
 
+  useEffect(() => {
+    if (!isAuthenticated || !groupId) return
+    void syncOneSignalGroupTag(groupId)
+  }, [isAuthenticated, groupId])
+
   const handleJoinCrew = async () => {
     setWelcomeError('')
     const name = welcomeName.trim()
@@ -1855,6 +1861,10 @@ function App() {
       setIsAuthenticated(true)
       setWelcomeName('')
       setWelcomeInvite('')
+      void syncOneSignalGroupTag(normalizedGroupId)
+      window.setTimeout(() => {
+        void promptOneSignalNotifications()
+      }, 500)
     } catch (e) {
       console.error(e)
       setWelcomeError('Could not reach Firestore. Check rules, network, and config.')
@@ -1925,6 +1935,21 @@ function App() {
         })
       })
       if (clearLogInput) setLogInput('')
+
+      try {
+        await fetch('/.netlify/functions/send-push', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: username.trim(),
+            repsCount: n,
+            groupName: groupDisplayName || groupId,
+            currentGroupId: groupId,
+          }),
+        })
+      } catch (pushErr) {
+        console.warn('Push notification request failed:', pushErr)
+      }
     } catch (e) {
       console.error(e)
       setLogError('Update failed. Try again.')

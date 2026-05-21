@@ -1861,10 +1861,8 @@ function App() {
       setIsAuthenticated(true)
       setWelcomeName('')
       setWelcomeInvite('')
-      void syncOneSignalGroupTag(normalizedGroupId)
-      window.setTimeout(() => {
-        void promptOneSignalNotifications()
-      }, 500)
+      await syncOneSignalGroupTag(normalizedGroupId)
+      void promptOneSignalNotifications()
     } catch (e) {
       console.error(e)
       setWelcomeError('Could not reach Firestore. Check rules, network, and config.')
@@ -1937,16 +1935,20 @@ function App() {
       if (clearLogInput) setLogInput('')
 
       try {
-        await fetch('/.netlify/functions/send-push', {
+        const pushRes = await fetch('/.netlify/functions/send-push', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             username: username.trim(),
             repsCount: n,
             groupName: groupDisplayName || groupId,
-            currentGroupId: groupId,
+            currentGroupId: normalizeGroupCode(groupId),
           }),
         })
+        const pushBody = await pushRes.json().catch(() => ({}))
+        if (!pushRes.ok || pushBody.success === false) {
+          console.warn('Push notification failed:', pushRes.status, pushBody)
+        }
       } catch (pushErr) {
         console.warn('Push notification request failed:', pushErr)
       }

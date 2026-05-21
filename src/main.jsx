@@ -1,21 +1,10 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import OneSignal from 'react-onesignal'
 import './index.css'
 import App from './App.jsx'
+import { initOneSignal } from './onesignal'
 
-const oneSignalAppId = import.meta.env.VITE_ONESIGNAL_APP_ID
-
-if (oneSignalAppId && !globalThis.__pushappOneSignalInit) {
-  globalThis.__pushappOneSignalInit = true
-  OneSignal.init({
-    appId: oneSignalAppId,
-    allowLocalhostAsSecureOrigin: import.meta.env.DEV,
-    serviceWorkerPath: '/OneSignalSDKWorker.js',
-  }).catch((err) => {
-    console.warn('OneSignal init failed:', err)
-  })
-}
+initOneSignal()
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>

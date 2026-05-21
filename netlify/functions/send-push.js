@@ -1,46 +1,92 @@
 // netlify/functions/send-push.js
 
-exports.handler = async (event, context) => {
-    // Only allow secure POST requests from your app to avoid random link pings
-    if (event.httpMethod !== "POST") {
-      return { statusCode: 405, body: "Method Not Allowed" };
-    }
-  
-    try {
-      // Extract user tracking data sent from your frontend React app
-      const { username, repsCount, groupName, currentGroupId } = JSON.parse(event.body);
-  
-      const appId = process.env.VITE_ONESIGNAL_APP_ID;
-      const restApiKey = process.env.VITE_ONESIGNAL_REST_API_KEY;
-  
-      // Fire the secure server-to-server request directly to OneSignal
-      const response = await fetch("https://api.onesignal.com/notifications", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Basic ${restApiKey}` // Safely authorized in the cloud!
-        },
-        body: JSON.stringify({
-          app_id: appId,
-          headings: { en: "PushApp Alert! 🔥" },
-          contents: { en: `${username} just logged ${repsCount} pushups in ${groupName}!` },
-          // Target only friends subscribed with a matching Firestore Group ID tag
-          filters: [
-            { field: "tag", key: "groupId", relation: "=", value: currentGroupId }
-          ]
-        })
-      });
-  
-      const data = await response.json();
-  
+function readEnv(name) {
+  return process.env[name] || process.env[`VITE_${name}`] || ''
+}
+
+function onesignalAuthHeader(apiKey) {
+  const key = String(apiKey || '').trim()
+  if (!key) return ''
+  if (/^(Key|Basic)\s+/i.test(key)) return key
+  return `Key ${key}`
+}
+
+exports.handler = async (event) => {
+  if (event.httpMethod !== 'POST') {
+    return { statusCode: 405, body: 'Method Not Allowed' }
+  }
+
+  try {
+    const body = JSON.parse(event.body || '{}')
+    const username = String(body.username || '').trim()
+    const repsCount = Math.max(0, Math.floor(Number(body.repsCount) || 0))
+    const groupName = String(body.groupName || '').trim() || 'your crew'
+    const currentGroupId = String(body.currentGroupId || '').trim().toLowerCase()
+
+    if (!username || repsCount <= 0 || !currentGroupId) {
       return {
-        statusCode: 200,
-        body: JSON.stringify({ success: true, data })
-      };
-    } catch (error) {
+        statusCode: 400,
+        body: JSON.stringify({
+          error: 'username, repsCount (> 0), and currentGroupId are required',
+        }),
+      }
+    }
+
+    const appId = readEnv('ONESIGNAL_APP_ID')
+    const restApiKey = readEnv('ONESIGNAL_REST_API_KEY')
+    const authorization = onesignalAuthHeader(restApiKey)
+
+    if (!appId || !authorization) {
       return {
         statusCode: 500,
-        body: JSON.stringify({ error: error.message })
-      };
+        body: JSON.stringify({
+          error:
+            'Missing OneSignal credentials. Set ONESIGNAL_APP_ID and ONESIGNAL_REST_API_KEY (or VITE_* equivalents) for Netlify functions.',
+        }),
+      }
     }
-  };
+
+    const response = await fetch('https://api.onesignal.com/notifications', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: authorization,
+      },
+      body: JSON.stringify({
+        app_id: appId,
+        target_channel: 'push',
+        headings: { en: 'PushApp Alert! 🔥' },
+        contents: {
+          en: `${username} just logged ${repsCount} pushups in ${groupName}!`,
+        },
+        filters: [
+          { field: 'tag', key: 'groupId', relation: '=', value: currentGroupId },
+        ],
+      }),
+    })
+
+    const data = await response.json().catch(() => ({}))
+
+    if (!response.ok || data.errors) {
+      console.error('OneSignal API error:', response.status, data)
+      return {
+        statusCode: response.ok ? 502 : response.status,
+        body: JSON.stringify({
+          success: false,
+          onesignal: data,
+        }),
+      }
+    }
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ success: true, onesignal: data }),
+    }
+  } catch (error) {
+    console.error('send-push failed:', error)
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: error.message }),
+    }
+  }
+}

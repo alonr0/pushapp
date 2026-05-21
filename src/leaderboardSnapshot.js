@@ -70,6 +70,31 @@ export function parsePodiums(data) {
 }
 
 export const DEFAULT_PODIUMS = { first: 0, second: 0, third: 0 }
+export const DEFAULT_DAILY_GOAL = 50
+
+function isSameLocalCalendarDay(a, b) {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  )
+}
+
+function getDailyGoal(data) {
+  const g = Number(data?.dailyGoal)
+  if (Number.isFinite(g) && g > 0) return Math.min(Math.floor(g), 99_999)
+  return DEFAULT_DAILY_GOAL
+}
+
+/** Map live crew row from Firestore listener → shape used by getScoreForDate. */
+export function crewMemberToUserData(member) {
+  return {
+    dailyCount: member?.dailyCount ?? member?.today ?? 0,
+    lastUpdated: member?.lastUpdated ?? null,
+    history: member?.history ?? [],
+    dailyGoal: member?.dailyGoal,
+  }
+}
 
 function normalizeRankingRow(r, index) {
   if (!r || typeof r !== 'object') return null
@@ -105,20 +130,56 @@ export function isValidArchiveDateYMD(ymd) {
 }
 
 function scoreForCrewMember(member, dateYMD) {
-  const hist = Array.isArray(member?.history) ? member.history : []
-  const entry = hist.find((h) => h?.date === dateYMD)
-  if (entry) return Math.max(0, Math.floor(Number(entry.count) || 0))
-  const last = lastUpdatedToDate(member?.lastUpdated)
-  if (last && formatLocalYMD(last) === dateYMD) {
-    return Math.max(0, Math.floor(Number(member.today) || 0))
-  }
-  return 0
+  return getScoreForDate(crewMemberToUserData(member), dateYMD)
 }
 
-function memberHasScoreForDate(member, dateYMD) {
-  if ((member?.history ?? []).some((h) => h?.date === dateYMD)) return true
+function memberHasHistoryForDate(member, dateYMD) {
+  return (member?.history ?? []).some((h) => h?.date === dateYMD)
+}
+
+/** Goal outcome for one member on one calendar day (from history or live dailyCount). */
+export function goalInfoForMemberOnDate(member, dateYMD, score) {
+  const safeScore = Math.max(0, Math.floor(Number(score) || 0))
+  const fallbackGoal = Math.max(1, Math.floor(Number(member?.dailyGoal) || DEFAULT_DAILY_GOAL))
+
+  const entry = (member?.history ?? []).find((h) => h?.date === dateYMD)
+  if (entry) {
+    const goalAtDayEnd =
+      Number.isFinite(entry.goalAtDayEnd) && entry.goalAtDayEnd > 0
+        ? Math.floor(entry.goalAtDayEnd)
+        : fallbackGoal
+    const goalMet =
+      typeof entry.goalMet === 'boolean' ? entry.goalMet : safeScore >= goalAtDayEnd
+    return { goalMet, goalAtDayEnd }
+  }
+
   const last = lastUpdatedToDate(member?.lastUpdated)
-  return Boolean(last && formatLocalYMD(last) === dateYMD)
+  if (last && formatLocalYMD(last) === dateYMD) {
+    return { goalMet: safeScore >= fallbackGoal, goalAtDayEnd: fallbackGoal }
+  }
+
+  return { goalMet: safeScore >= fallbackGoal, goalAtDayEnd: fallbackGoal }
+}
+
+export function enrichRankingsForDate(rankings, members, dateYMD) {
+  const byName = new Map(
+    members.map((m) => [String(m.name).trim().toLowerCase(), m]),
+  )
+  const byPodiums = new Map(
+    members.map((m) => [String(m.name).trim().toLowerCase(), m.podiums ?? DEFAULT_PODIUMS]),
+  )
+
+  return rankings.map((r) => {
+    const key = r.name.trim().toLowerCase()
+    const member = byName.get(key)
+    const { goalMet, goalAtDayEnd } = goalInfoForMemberOnDate(member, dateYMD, r.score)
+    return {
+      ...r,
+      goalMet,
+      goalAtDayEnd,
+      podiums: byPodiums.get(key) ?? DEFAULT_PODIUMS,
+    }
+  })
 }
 
 function rankingsEqual(a, b) {
@@ -146,15 +207,24 @@ export function buildFullGroupRankingsForDate(members, dateYMD, snapshotRankings
     const key = name.toLowerCase()
     const crewScore = scoreForCrewMember(m, dateYMD)
     const snapScore = scoreByName.get(key)
-    // Live crew history wins when present; snapshot fills gaps only (avoids stale docs).
-    const score = memberHasScoreForDate(m, dateYMD)
-      ? crewScore
-      : snapScore !== undefined
-        ? snapScore
-        : crewScore
-    entries.push({ name, score })
+    // Prefer live Firestore-backed score (history or un-archived dailyCount on last active day).
+    // Snapshot fills gaps only when the member has no live data for that day yet.
+    const score =
+      crewScore > 0 || memberHasHistoryForDate(m, dateYMD)
+        ? crewScore
+        : snapScore !== undefined
+          ? snapScore
+          : crewScore
+    const { goalMet, goalAtDayEnd } = goalInfoForMemberOnDate(m, dateYMD, score)
+    entries.push({ name, score, goalMet, goalAtDayEnd })
   }
-  return assignCompetitionRanks(entries).map(({ name, score, rank }) => ({ name, score, rank }))
+  return assignCompetitionRanks(entries).map(({ name, score, rank, goalMet, goalAtDayEnd }) => ({
+    name,
+    score,
+    rank,
+    goalMet,
+    goalAtDayEnd,
+  }))
 }
 
 /** History picker: archived days only (excludes today and yesterday). */
@@ -180,6 +250,11 @@ export function discoverGroupArchiveDates(firestoreDateIds, crewMembers) {
     }
   }
   return [...dates].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
+}
+
+/** Top-3 finishers eligible for a podium medal (never award on 0 reps). */
+export function podiumAwardEntries(ranked) {
+  return ranked.filter((r) => r.rank <= 3 && r.score > 0)
 }
 
 /** Competition ranking: tied scores share the same rank. */
@@ -280,7 +355,7 @@ export async function ensureGroupSnapshotForDate(groupId, dateYMD, options = {})
     if (snap.exists()) return
 
     const allowAward = awardPodiums && isClosedCalendarDay(dateYMD)
-    const podiumEntries = allowAward ? ranked.filter((r) => r.rank <= 3) : []
+    const podiumEntries = allowAward ? podiumAwardEntries(ranked) : []
     const userRefs = podiumEntries.map((r) => doc(db, 'users', r.userId))
     const userSnaps =
       podiumEntries.length > 0
@@ -291,10 +366,10 @@ export async function ensureGroupSnapshotForDate(groupId, dateYMD, options = {})
       date: dateYMD,
       rankings: publicRankings,
       createdAt: serverTimestamp(),
-      podiumsAwarded: allowAward,
+      podiumsAwarded: podiumEntries.length > 0,
     })
 
-    if (!allowAward) return
+    if (podiumEntries.length === 0) return
 
     for (let i = 0; i < podiumEntries.length; i++) {
       const { userId, rank } = podiumEntries[i]
@@ -413,14 +488,14 @@ export async function syncGroupSnapshotForDate(groupId, dateYMD, options = {}) {
     const snapData = snap.exists() ? snap.data() : null
     const alreadyAwarded = snapData?.podiumsAwarded === true
     const podiumEntries =
-      shouldAwardPodiums && !alreadyAwarded ? ranked.filter((r) => r.rank <= 3) : []
+      shouldAwardPodiums && !alreadyAwarded ? podiumAwardEntries(ranked) : []
     const userRefs = podiumEntries.map((r) => doc(db, 'users', r.userId))
     const userSnaps =
       podiumEntries.length > 0
         ? await Promise.all(userRefs.map((ref) => transaction.get(ref)))
         : []
 
-    const awardNow = shouldAwardPodiums && !alreadyAwarded
+    const awardNow = podiumEntries.length > 0
 
     if (snap.exists()) {
       transaction.update(snapRef, {
@@ -471,6 +546,54 @@ export async function ensureYesterdayGroupSnapshot(groupId) {
 }
 
 /**
+ * Archives the opening user's previous calendar day into `history` and resets their dailyCount.
+ * Other members stay on Firestore until they open; getScoreForDate reads their stale dailyCount.
+ */
+export async function applyLazyMidnightResetForUser(userId) {
+  const ref = doc(db, 'users', userId)
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(ref)
+    if (!snap.exists()) return
+
+    const data = snap.data()
+    const last = lastUpdatedToDate(data.lastUpdated)
+    const now = new Date()
+    if (!last || isSameLocalCalendarDay(last, now)) return
+
+    const daily = Math.max(0, Math.floor(Number(data.dailyCount) || 0))
+    const goal = getDailyGoal(data)
+    const history = parseHistoryFromFirestore(data.history)
+    const archivedDate = formatLocalYMD(last)
+
+    if (daily > 0) {
+      transaction.update(ref, {
+        dailyCount: 0,
+        history: [...history, { date: archivedDate, count: daily, goalMet: daily >= goal, goalAtDayEnd: goal }],
+        lastUpdated: serverTimestamp(),
+      })
+    } else {
+      transaction.update(ref, {
+        lastUpdated: serverTimestamp(),
+      })
+    }
+  })
+}
+
+/**
+ * Runs when any crew member opens the app: roll over the opener's day, then rebuild
+ * yesterday's group snapshot from every member's Firestore doc (not only the opener).
+ */
+export async function runGroupDayRollover(groupId, openingUserId) {
+  const gid = groupId?.trim().toLowerCase()
+  const uid = openingUserId?.trim()
+  if (!gid || !uid) return { yesterdayRankings: [] }
+
+  await applyLazyMidnightResetForUser(uid)
+  const yesterdayRankings = await ensureYesterdayGroupSnapshot(gid)
+  return { yesterdayRankings }
+}
+
+/**
  * Rebuilds each user's podium counts from closed-day snapshots only (fixes mistaken today awards).
  */
 export async function recalcGroupPodiumsFromSnapshots(groupId, options = {}) {
@@ -513,7 +636,7 @@ export async function recalcGroupPodiumsFromSnapshots(groupId, options = {}) {
     closedDays.push(dateYMD)
     onProgress?.(`count: ${dateYMD}`)
     const rankings = parseRankingsFromSnapshot(d.data())
-    for (const row of rankings.filter((r) => r.rank <= 3)) {
+    for (const row of rankings.filter((r) => r.rank <= 3 && r.score > 0)) {
       const uid = nameToUserId.get(row.name.trim().toLowerCase())
       if (!uid) {
         unmatched.push({ date: dateYMD, name: row.name, rank: row.rank })

@@ -17,10 +17,17 @@ Mobile-friendly pushup tracker for crews. Log daily reps, hit personal goals, an
 
 ### Leaderboard
 - **Yesterday results** — podium + ranked list; **Share** as text (WhatsApp) or PNG image
-- **All-time rankings** — top 3, rest of crew, and **all-time losers** (0 lifetime reps)
+- **All-time rankings** — top 3, rest of crew, and **all-time losers** (lowest lifetime total — always at least one)
 - **Leaderboard history** — pick any archived day (two or more days ago)
 
-Day rollover archives yesterday’s count into `history`, syncs the group snapshot, and awards podium medals when appropriate.
+### Day rollover (any crew member opens the app)
+
+1. **Lazy reset** — archives the *opening* user’s previous calendar day into `history` and clears their `dailyCount`.
+2. **Group snapshot** — `runGroupDayRollover` rebuilds `groups/{groupId}/dailyLeaderboards/{yesterday}` from **every** member’s Firestore document (`getScoreForDate`), including members who have not opened the app yet (their reps still live in `dailyCount` with `lastUpdated` on that day).
+3. **UI merge** — `buildFullGroupRankingsForDate` uses the same `getScoreForDate` rules so yesterday standings show the full crew immediately, not only the opener.
+4. **Podiums** — awarded once per closed day to top-3 finishers with **score &gt; 0** only (no medals if everyone logged 0).
+
+Other members are reset only when they open the app (client cannot write their `users` docs). Yesterday scores for inactive members still count via `dailyCount` until then.
 
 ## Tech stack
 

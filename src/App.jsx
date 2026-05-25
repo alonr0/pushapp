@@ -31,11 +31,13 @@ import {
   filterLeaderboardHistoryDates,
   formatLocalYMD,
   crewMemberToUserData,
+  buildArchivePatchForStaleDay,
   ensureYesterdayGroupSnapshot,
   getScoreForDate,
   getYesterdayYMD,
   lastUpdatedToDate,
   runGroupDayRollover,
+  todayDailyCountForWrite,
   parsePodiums,
   parseRankingsFromSnapshot,
   ymdToDisplayLabel,
@@ -163,6 +165,44 @@ function ymdToChartLabel(ymd) {
   if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return ymd
   const [y, m, d] = parts
   return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+const CHART_RANGE_MODES = [
+  { id: 'week', label: 'Last week', days: 7 },
+  { id: 'month', label: 'Last month', days: 30 },
+  { id: 'all', label: 'All time', days: null },
+]
+
+/** Calendar-day series for the activity chart (0-rep days included; excludes today). */
+function buildChartSeriesForMode(filledAsc, mode) {
+  const today = formatLocalYMD(new Date())
+  const yesterday = getYesterdayYMD()
+  const chartHistory = filledAsc.filter((e) => e.date !== today)
+  const byDate = new Map(chartHistory.map((e) => [e.date, e]))
+
+  if (mode === 'all') {
+    return chartHistory.map((e) => ({
+      dateKey: e.date,
+      label: ymdToChartLabel(e.date),
+      count: e.count,
+    }))
+  }
+
+  const days = mode === 'week' ? 7 : 30
+  const start = shiftYMD(yesterday, -(days - 1))
+  const out = []
+  let cursor = start
+  while (cursor <= yesterday) {
+    const existing = byDate.get(cursor)
+    const count = existing?.count ?? 0
+    out.push({
+      dateKey: cursor,
+      label: ymdToChartLabel(cursor),
+      count,
+    })
+    cursor = shiftYMD(cursor, 1)
+  }
+  return out
 }
 
 function computeDayStreaks(sortedAsc) {
@@ -673,22 +713,21 @@ function HistoryTimeRail({ history, currentGoal }) {
 }
 
 function HistoryAnalyticsView({ history, totalCount, hydrated }) {
-  const sortedAsc = useMemo(() => sortHistoryChronological(history), [history])
+  const [chartMode, setChartMode] = useState('week')
 
-  const chartRows = useMemo(() => {
-    return sortedAsc
-      .map((e) => ({
-        dateKey: e.date,
-        label: ymdToChartLabel(e.date),
-        count: e.count,
-      }))
-      .slice(-7)
-  }, [sortedAsc])
+  const filledAsc = useMemo(() => sortHistoryChronological(history), [history])
+
+  const chartRows = useMemo(
+    () => buildChartSeriesForMode(filledAsc, chartMode),
+    [filledAsc, chartMode],
+  )
+
+  const chartModeLabel = CHART_RANGE_MODES.find((m) => m.id === chartMode)?.label ?? ''
 
   const stats = useMemo(() => {
-    const { currentStreak, totalGoalDays } = computeDayStreaks(sortedAsc)
-    const n = sortedAsc.length
-    const sum = sortedAsc.reduce((s, e) => s + e.count, 0)
+    const { currentStreak, totalGoalDays } = computeDayStreaks(filledAsc)
+    const n = filledAsc.length
+    const sum = filledAsc.reduce((s, e) => s + e.count, 0)
     const dailyAvg = n > 0 ? Math.round((sum / n) * 10) / 10 : null
     return {
       allTime: Math.max(0, Math.floor(Number(totalCount) || 0)),
@@ -696,7 +735,7 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
       currentStreak,
       totalGoalDays,
     }
-  }, [sortedAsc, totalCount])
+  }, [filledAsc, totalCount])
 
   if (!hydrated) {
     return (
@@ -748,8 +787,35 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
       </section>
 
       <div className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-4 backdrop-blur-sm sm:p-5">
-        <p className="text-xs font-medium text-slate-400">Last sessions</p>
-        {sortedAsc.length === 0 ? (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-xs font-medium text-slate-400">Activity</p>
+            <p className="mt-0.5 text-[11px] text-slate-600">{chartModeLabel}</p>
+          </div>
+          <div
+            className="inline-flex rounded-xl border border-slate-700/90 bg-slate-950/60 p-0.5"
+            role="tablist"
+            aria-label="Chart time range"
+          >
+            {CHART_RANGE_MODES.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                role="tab"
+                aria-selected={chartMode === m.id}
+                onClick={() => setChartMode(m.id)}
+                className={`rounded-lg px-3 py-1.5 text-[11px] font-semibold transition sm:text-xs ${
+                  chartMode === m.id
+                    ? 'bg-emerald-500/20 text-emerald-300 shadow-sm shadow-emerald-950/30'
+                    : 'text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {filledAsc.length === 0 ? (
           <div className="mt-10 flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-800 bg-slate-950/40 py-14 text-center">
             <p className="max-w-[240px] text-sm leading-relaxed text-slate-500">
               No workouts logged yet. Smash some reps to see your graph!
@@ -769,9 +835,11 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
                 <CartesianGrid strokeDasharray="3 6" stroke="#1e293b" vertical={false} />
                 <XAxis
                   dataKey="label"
-                  tick={{ fill: '#64748b', fontSize: 11 }}
+                  tick={{ fill: '#64748b', fontSize: chartRows.length > 20 ? 9 : 11 }}
                   axisLine={{ stroke: '#334155' }}
                   tickLine={false}
+                  interval={chartRows.length > 14 ? 'preserveStartEnd' : 0}
+                  minTickGap={chartRows.length > 14 ? 28 : 8}
                 />
                 <YAxis
                   tick={{ fill: '#64748b', fontSize: 11 }}
@@ -802,7 +870,11 @@ function HistoryAnalyticsView({ history, totalCount, hydrated }) {
                   stroke="#34d399"
                   strokeWidth={2.5}
                   fill="url(#pushAreaFill)"
-                  dot={{ fill: '#10b981', stroke: '#0f172a', strokeWidth: 2, r: 4 }}
+                  dot={
+                    chartRows.length > 20
+                      ? false
+                      : { fill: '#10b981', stroke: '#0f172a', strokeWidth: 2, r: 4 }
+                  }
                   activeDot={{ r: 6, fill: '#34d399', stroke: '#fff', strokeWidth: 2 }}
                 />
               </AreaChart>
@@ -1503,6 +1575,8 @@ function App() {
   const [logInput, setLogInput] = useState('')
   const [activeTab, setActiveTab] = useState('dashboard')
   const [isLoggingPushups, setIsLoggingPushups] = useState(false)
+  const [dayRolloverReady, setDayRolloverReady] = useState(false)
+  const [calendarYMD, setCalendarYMD] = useState(() => formatLocalYMD(new Date()))
   const [logError, setLogError] = useState('')
 
   const [leaderboardRows, setLeaderboardRows] = useState([])
@@ -1517,7 +1591,11 @@ function App() {
   const [fixDraft, setFixDraft] = useState('0')
   const [fixSaving, setFixSaving] = useState(false)
 
-  const yesterdayYMD = useMemo(() => getYesterdayYMD(), [])
+  const yesterdayYMD = useMemo(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 1)
+    return formatLocalYMD(d)
+  }, [calendarYMD])
   const [groupLeaderboardDates, setGroupLeaderboardDates] = useState([])
   const [selectedGroupHistoryDate, setSelectedGroupHistoryDate] = useState('')
   const [selectedGroupRankings, setSelectedGroupRankings] = useState([])
@@ -1632,16 +1710,39 @@ function App() {
   }, [isAuthenticated, username, groupId])
 
   useEffect(() => {
-    if (!isAuthenticated || !userDocId || !groupId) return undefined
+    const refreshCalendar = () => {
+      const next = formatLocalYMD(new Date())
+      setCalendarYMD((prev) => (prev === next ? prev : next))
+    }
+    refreshCalendar()
+    const interval = setInterval(refreshCalendar, 60_000)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refreshCalendar()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isAuthenticated || !userDocId || !groupId) {
+      setDayRolloverReady(false)
+      return undefined
+    }
 
     let cancelled = false
+    setDayRolloverReady(false)
     ;(async () => {
       try {
         await runGroupDayRollover(groupId, userDocId)
+        if (!cancelled) setDayRolloverReady(true)
       } catch (e) {
         console.error(e)
         if (!cancelled) {
           setSyncError('Could not apply day rollover or sync standings. Check Firestore rules.')
+          setDayRolloverReady(true)
         }
       }
     })()
@@ -1649,7 +1750,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [isAuthenticated, userDocId, groupId])
+  }, [isAuthenticated, userDocId, groupId, calendarYMD])
 
   /** Re-sync yesterday snapshot when any crew member's history changes (late resets, retro edits). */
   useEffect(() => {
@@ -1925,8 +2026,10 @@ function App() {
         const snap = await transaction.get(ref)
         if (!snap.exists()) throw new Error('User document missing')
         const data = snap.data()
-        const daily = todayDailyFromUserDoc(data)
+        const archivePatch = buildArchivePatchForStaleDay(data)
+        const daily = archivePatch ? 0 : todayDailyCountForWrite(data)
         transaction.update(ref, {
+          ...(archivePatch ?? {}),
           dailyCount: daily + n,
           totalCount: increment(n),
           lastUpdated: serverTimestamp(),
@@ -1971,9 +2074,11 @@ function App() {
         const snap = await transaction.get(ref)
         if (!snap.exists()) throw new Error('User document missing')
         const data = snap.data()
-        const currentDaily = todayDailyFromUserDoc(data)
+        const archivePatch = buildArchivePatchForStaleDay(data)
+        const currentDaily = archivePatch ? 0 : todayDailyCountForWrite(data)
         const delta = newDaily - currentDaily
         transaction.update(ref, {
+          ...(archivePatch ?? {}),
           dailyCount: newDaily,
           totalCount: Math.max(0, Math.floor(Number(data.totalCount) || 0) + delta),
           lastUpdated: serverTimestamp(),
@@ -2072,7 +2177,7 @@ function App() {
                 todayCount={todayCount}
                 dailyGoal={myDailyGoal}
                 hydrated={leaderboardHydrated}
-                busy={isLoggingPushups}
+                busy={isLoggingPushups || !dayRolloverReady}
                 logError={logError}
                 logInput={logInput}
                 onLogInputChange={(e) => setLogInput(e.target.value)}

@@ -1,36 +1,63 @@
-import { doc, getDoc, updateDoc } from 'firebase/firestore'
+import { collection, doc, getDoc, getDocs, query, updateDoc, where } from 'firebase/firestore'
 import { db } from './firebase'
-import { formatLocalYMD, isValidArchiveDateYMD } from './leaderboardSnapshot'
+import { DEFAULT_DAILY_GOAL, formatLocalYMD, isValidArchiveDateYMD } from './leaderboardSnapshot'
 
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
 
-function toUserDocumentId(displayName, groupId) {
+export function toUserDocumentId(displayName, groupId) {
   const g = groupId.trim().toLowerCase().replace(/[/:]/g, '-')
   const n = displayName.trim().toLowerCase().replace(/[/:]/g, '-')
   return `${g}::${n}`
 }
 
-function normalizeHistoryEntry(e) {
-  if (!e || typeof e.date !== 'string') return null
-  const count = Math.max(0, Math.floor(Number(e.count) || 0))
-  const goalAtDayEnd = Number(e.goalAtDayEnd)
-  const goalMet =
-    typeof e.goalMet === 'boolean'
-      ? e.goalMet
-      : Number.isFinite(goalAtDayEnd) && goalAtDayEnd > 0
-        ? count >= goalAtDayEnd
-        : false
+export function getUserDailyGoal(data) {
+  const g = Number(data?.dailyGoal)
+  if (Number.isFinite(g) && g > 0) return Math.min(Math.floor(g), 99_999)
+  return DEFAULT_DAILY_GOAL
+}
+
+/** Full Firestore history row with goal fields (no undefined). */
+export function buildHistoryEntry({ date, count, goalAtDayEnd }) {
+  const goal = Math.max(1, Math.floor(Number(goalAtDayEnd) || DEFAULT_DAILY_GOAL))
+  const c = Math.max(0, Math.floor(Number(count) || 0))
   return {
-    date: e.date,
-    count,
-    goalMet,
-    goalAtDayEnd: Number.isFinite(goalAtDayEnd) && goalAtDayEnd > 0 ? goalAtDayEnd : undefined,
+    date,
+    count: c,
+    goalAtDayEnd: goal,
+    goalMet: c >= goal,
   }
 }
 
-function parseHistoryFromFirestore(h) {
-  if (!Array.isArray(h)) return []
-  return h.map(normalizeHistoryEntry).filter(Boolean)
+/** Enrich one raw or parsed entry; uses fallbackGoal only when goalAtDayEnd is missing. */
+export function enrichHistoryEntry(entry, fallbackGoal) {
+  if (!entry || typeof entry.date !== 'string') return null
+  const existingGoal = Number(entry.goalAtDayEnd)
+  const goalAtDayEnd =
+    Number.isFinite(existingGoal) && existingGoal > 0
+      ? Math.floor(existingGoal)
+      : Math.max(1, Math.floor(Number(fallbackGoal) || DEFAULT_DAILY_GOAL))
+  return buildHistoryEntry({
+    date: entry.date,
+    count: entry.count,
+    goalAtDayEnd,
+  })
+}
+
+export function enrichHistoryArray(history, fallbackGoal) {
+  if (!Array.isArray(history)) return []
+  return history
+    .map((e) => enrichHistoryEntry(e, fallbackGoal))
+    .filter(Boolean)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+}
+
+function historyNeedsEnrich(history) {
+  if (!Array.isArray(history)) return true
+  return history.some((e) => {
+    if (!e || typeof e.date !== 'string') return true
+    const g = Number(e.goalAtDayEnd)
+    return !(Number.isFinite(g) && g > 0) || typeof e.goalMet !== 'boolean'
+  })
 }
 
 /** Accepts YYYY-MM-DD, DD-MM, DD/MM, DD-MM-YYYY, etc. */
@@ -60,7 +87,8 @@ export function parseRetroDateInput(input) {
 
 /**
  * Add or replace one day in a user's history (Firestore).
- * @returns {{ userDocId, dateYMD, previousCount, count, goal, totalCount }}
+ * @param {object} opts
+ * @param {number} [opts.goal] — omit to use the user's current dailyGoal
  */
 export async function upsertUserHistoryDay({
   groupId,
@@ -76,7 +104,6 @@ export async function upsertUserHistoryDay({
   if (!isValidArchiveDateYMD(dateYMD)) throw new Error(`Invalid dateYMD: ${dateYMD}`)
 
   const reps = Math.max(0, Math.floor(Number(count) || 0))
-  const goalAtDayEnd = Math.max(1, Math.floor(Number(goal) || 0))
   const userDocId = toUserDocumentId(name, gid)
   const ref = doc(db, 'users', userDocId)
   const snap = await getDoc(ref)
@@ -88,19 +115,23 @@ export async function upsertUserHistoryDay({
   }
 
   const data = snap.data()
-  const history = parseHistoryFromFirestore(data.history)
+  const fallbackGoal = getUserDailyGoal(data)
+  const goalAtDayEnd =
+    goal !== undefined && goal !== null && Number.isFinite(Number(goal)) && Number(goal) > 0
+      ? Math.max(1, Math.floor(Number(goal)))
+      : fallbackGoal
+
+  const history = enrichHistoryArray(data.history, fallbackGoal)
   const prev = history.find((e) => e.date === dateYMD)
   const previousCount = prev?.count ?? 0
-  const entry = {
-    date: dateYMD,
-    count: reps,
-    goalMet: reps >= goalAtDayEnd,
-    goalAtDayEnd,
-  }
-  const nextHistory = [...history.filter((e) => e.date !== dateYMD), entry].sort((a, b) =>
-    a.date < b.date ? -1 : a.date > b.date ? 1 : 0,
+  const entry = buildHistoryEntry({ date: dateYMD, count: reps, goalAtDayEnd })
+  const nextHistory = enrichHistoryArray(
+    [...history.filter((e) => e.date !== dateYMD), entry],
+    fallbackGoal,
   )
-  const totalCount = Math.max(0, (Number(data.totalCount) || 0) + (reps - previousCount))
+
+  const totalDelta = previousCount > 0 ? reps - previousCount : 0
+  const totalCount = Math.max(0, (Number(data.totalCount) || 0) + totalDelta)
 
   if (!dryRun) {
     await updateDoc(ref, { history: nextHistory, totalCount })
@@ -113,6 +144,44 @@ export async function upsertUserHistoryDay({
     count: reps,
     goal: goalAtDayEnd,
     totalCount,
+    totalDelta,
     dryRun,
   }
+}
+
+/**
+ * Fill goalAtDayEnd / goalMet on every history entry in a group.
+ * Missing goals use each member's current dailyGoal (update-time only).
+ */
+export async function enrichGroupHistoryGoals(groupId, options = {}) {
+  const { dryRun = false } = options
+  const gid = groupId.trim().toLowerCase()
+  if (!gid) throw new Error('groupId is required')
+
+  const usersSnap = await getDocs(query(collection(db, 'users'), where('groupId', '==', gid)))
+  const updated = []
+  const skipped = []
+
+  for (const d of usersSnap.docs) {
+    const data = d.data()
+    const name = typeof data.name === 'string' && data.name.trim() ? data.name.trim() : d.id
+    const fallbackGoal = getUserDailyGoal(data)
+    const nextHistory = enrichHistoryArray(data.history, fallbackGoal)
+
+    if (nextHistory.length === 0) {
+      skipped.push({ userId: d.id, name, reason: 'no history' })
+      continue
+    }
+    if (!historyNeedsEnrich(data.history)) {
+      skipped.push({ userId: d.id, name, reason: 'already complete' })
+      continue
+    }
+
+    if (!dryRun) {
+      await updateDoc(doc(db, 'users', d.id), { history: nextHistory })
+    }
+    updated.push({ userId: d.id, name, days: nextHistory.length, goalUsed: fallbackGoal })
+  }
+
+  return { groupId: gid, updated, skipped, dryRun }
 }

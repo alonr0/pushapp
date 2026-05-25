@@ -44,9 +44,53 @@ function parseHistoryFromFirestore(h) {
   return h
     .map((e) => {
       if (!e || typeof e.date !== 'string') return null
-      return { date: e.date, count: Math.max(0, Math.floor(Number(e.count) || 0)) }
+      const count = Math.max(0, Math.floor(Number(e.count) || 0))
+      const goalAtDayEnd = Number(e.goalAtDayEnd)
+      const out = { date: e.date, count }
+      if (Number.isFinite(goalAtDayEnd) && goalAtDayEnd > 0) {
+        out.goalAtDayEnd = Math.floor(goalAtDayEnd)
+        out.goalMet =
+          typeof e.goalMet === 'boolean' ? e.goalMet : count >= out.goalAtDayEnd
+      }
+      return out
     })
     .filter(Boolean)
+}
+
+function mergeHistoryEntry(history, entry) {
+  const next = [...history.filter((h) => h.date !== entry.date), entry]
+  return next.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+}
+
+/**
+ * When lastUpdated is before today (local), archive that day into history (including 0-rep days).
+ * @returns {{ dailyCount: number, history: Array } | null}
+ */
+export function buildArchivePatchForStaleDay(data, now = new Date()) {
+  const last = lastUpdatedToDate(data?.lastUpdated)
+  if (!last || isSameLocalCalendarDay(last, now)) return null
+
+  const daily = Math.max(0, Math.floor(Number(data.dailyCount) || 0))
+  const goal = getDailyGoal(data)
+  const archivedDate = formatLocalYMD(last)
+  const history = parseHistoryFromFirestore(data?.history)
+  const entry = {
+    date: archivedDate,
+    count: daily,
+    goalMet: daily >= goal,
+    goalAtDayEnd: goal,
+  }
+  return {
+    dailyCount: 0,
+    history: mergeHistoryEntry(history, entry),
+  }
+}
+
+/** Reps that count toward "today" for writes (0 if last activity was a prior calendar day). */
+export function todayDailyCountForWrite(data, now = new Date()) {
+  const last = lastUpdatedToDate(data?.lastUpdated)
+  if (!last || !isSameLocalCalendarDay(last, now)) return 0
+  return Math.max(0, Math.floor(Number(data.dailyCount) || 0))
 }
 
 /** Best-effort score for a calendar day (handles pre-reset dailyCount + archived history). */
@@ -330,7 +374,7 @@ function buildRankedEntriesForDate(userDocs, dateYMD, options = {}) {
  * @returns {{ status: 'invalid'|'exists'|'empty'|'created', rankings: Array }}
  */
 export async function ensureGroupSnapshotForDate(groupId, dateYMD, options = {}) {
-  const { awardPodiums = false, includeZeroScores = false } = options
+  const { awardPodiums = false, includeZeroScores = true } = options
   const gid = groupId.trim().toLowerCase()
   if (!gid || !isValidArchiveDateYMD(dateYMD)) {
     return { status: 'invalid', rankings: [] }
@@ -455,7 +499,7 @@ export async function backfillGroupDailyLeaderboards(groupId, options = {}) {
  * @returns {{ status: string, rankings: Array }}
  */
 export async function syncGroupSnapshotForDate(groupId, dateYMD, options = {}) {
-  const { awardPodiums = false, includeZeroScores = false } = options
+  const { awardPodiums = false, includeZeroScores = true } = options
   const gid = groupId.trim().toLowerCase()
   if (!gid || !isValidArchiveDateYMD(dateYMD)) {
     return { status: 'invalid', rankings: [] }
@@ -555,27 +599,13 @@ export async function applyLazyMidnightResetForUser(userId) {
     const snap = await transaction.get(ref)
     if (!snap.exists()) return
 
-    const data = snap.data()
-    const last = lastUpdatedToDate(data.lastUpdated)
-    const now = new Date()
-    if (!last || isSameLocalCalendarDay(last, now)) return
+    const archivePatch = buildArchivePatchForStaleDay(snap.data())
+    if (!archivePatch) return
 
-    const daily = Math.max(0, Math.floor(Number(data.dailyCount) || 0))
-    const goal = getDailyGoal(data)
-    const history = parseHistoryFromFirestore(data.history)
-    const archivedDate = formatLocalYMD(last)
-
-    if (daily > 0) {
-      transaction.update(ref, {
-        dailyCount: 0,
-        history: [...history, { date: archivedDate, count: daily, goalMet: daily >= goal, goalAtDayEnd: goal }],
-        lastUpdated: serverTimestamp(),
-      })
-    } else {
-      transaction.update(ref, {
-        lastUpdated: serverTimestamp(),
-      })
-    }
+    transaction.update(ref, {
+      ...archivePatch,
+      lastUpdated: serverTimestamp(),
+    })
   })
 }
 

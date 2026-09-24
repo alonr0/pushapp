@@ -2037,6 +2037,22 @@ function App() {
           lastUpdated: serverTimestamp(),
         })
       })
+      const updated = await getDoc(ref)
+      if (updated.exists()) {
+        const data = updated.data()
+        setLeaderboardRows((rows) => rows.map((row) => row.id === userDocId
+          ? {
+              ...row,
+              today: effectiveDailyCount(data),
+              dailyCount: Math.max(0, Math.floor(Number(data.dailyCount) || 0)),
+              totalCount: Math.max(0, Math.floor(Number(data.totalCount) || 0)),
+              history: parseHistory(data.history),
+              lastUpdated: data.lastUpdated ?? null,
+              dailyGoal: getDailyGoal(data),
+              podiums: parsePodiums(data),
+            }
+          : row))
+      }
       if (clearLogInput) setLogInput('')
 
       try {

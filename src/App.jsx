@@ -20,8 +20,8 @@ import {
   setDoc,
   updateDoc,
   where,
-} from 'firebase/firestore'
-import { db } from './firebase'
+} from './store'
+import { db, ensureSignedIn, joinGroup, supabase } from './store'
 import {
   assignCompetitionRanks,
   buildFullGroupRankingsForDate,
@@ -52,6 +52,7 @@ import { promptOneSignalNotifications, syncOneSignalGroupTag } from './onesignal
 const LOGO_SRC = '/logo.png'
 
 const DEFAULT_DAILY_GOAL = 50
+const MAX_DAILY_COUNT = 2_147_483_647
 const USERNAME_STORAGE_KEY = 'username'
 const GROUP_ID_STORAGE_KEY = 'pushapp_groupId'
 const EMPTY_HISTORY = []
@@ -114,7 +115,7 @@ function normalizeHistoryEntry(e) {
   }
 }
 
-function parseHistoryFromFirestore(h) {
+function parseHistory(h) {
   if (!Array.isArray(h)) return []
   return h.map(normalizeHistoryEntry).filter(Boolean)
 }
@@ -222,16 +223,6 @@ function sortDatesDesc(dates) {
   return [...dates].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
 }
 
-function enrichRankingsWithPodiums(rankings, members) {
-  const byName = new Map(
-    members.map((m) => [m.name.trim().toLowerCase(), m.podiums ?? DEFAULT_PODIUMS]),
-  )
-  return rankings.map((r) => ({
-    ...r,
-    podiums: byName.get(r.name.trim().toLowerCase()) ?? DEFAULT_PODIUMS,
-  }))
-}
-
 /** Stored dailyCount only counts for "today" in the user's local calendar. */
 function effectiveDailyCount(data) {
   const raw = Number(data?.dailyCount) || 0
@@ -240,11 +231,6 @@ function effectiveDailyCount(data) {
   const now = new Date()
   if (!isSameLocalCalendarDay(last, now)) return 0
   return raw
-}
-
-/** Today's reps from Firestore user doc (same rules as effectiveDailyCount). */
-function todayDailyFromUserDoc(data) {
-  return Math.max(0, Math.floor(effectiveDailyCount(data)))
 }
 
 /** Highest reps logged on a single day (archived history + today). */
@@ -1563,9 +1549,8 @@ function App() {
   const [username, setUsername] = useState(initialSession.username)
   const [groupId, setGroupId] = useState(initialSession.groupId)
   const [groupDisplayName, setGroupDisplayName] = useState('')
-  const [isAuthenticated, setIsAuthenticated] = useState(
-    Boolean(initialSession.username && initialSession.groupId),
-  )
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [authReady, setAuthReady] = useState(false)
 
   const [welcomeName, setWelcomeName] = useState('')
   const [welcomeInvite, setWelcomeInvite] = useState('')
@@ -1591,11 +1576,7 @@ function App() {
   const [fixDraft, setFixDraft] = useState('0')
   const [fixSaving, setFixSaving] = useState(false)
 
-  const yesterdayYMD = useMemo(() => {
-    const d = new Date()
-    d.setDate(d.getDate() - 1)
-    return formatLocalYMD(d)
-  }, [calendarYMD])
+  const yesterdayYMD = useMemo(() => shiftYMD(calendarYMD, -1), [calendarYMD])
   const [groupLeaderboardDates, setGroupLeaderboardDates] = useState([])
   const [selectedGroupHistoryDate, setSelectedGroupHistoryDate] = useState('')
   const [selectedGroupRankings, setSelectedGroupRankings] = useState([])
@@ -1692,6 +1673,28 @@ function App() {
   )
 
   useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        await ensureSignedIn()
+        if (initialSession.username && initialSession.groupId) {
+          await joinGroup(initialSession.groupId, initialSession.username)
+        }
+        if (!cancelled) setIsAuthenticated(Boolean(initialSession.username && initialSession.groupId))
+      } catch (error) {
+        console.error(error)
+        if (!cancelled) {
+          setIsAuthenticated(false)
+          setWelcomeError('Could not restore your Supabase session. Check your connection and try joining again.')
+        }
+      } finally {
+        if (!cancelled) setAuthReady(true)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [initialSession.groupId, initialSession.username])
+
+  useEffect(() => {
     if (!isAuthenticated || !username.trim() || !groupId) return undefined
 
     let alive = true
@@ -1700,7 +1703,7 @@ function App() {
         await ensureUserDocument(username, groupId)
       } catch (e) {
         console.error(e)
-        if (alive) setSyncError('Could not sync your profile. Check Firestore rules.')
+        if (alive) setSyncError('Could not sync your profile. Check Supabase access policies.')
       }
     })()
 
@@ -1728,12 +1731,10 @@ function App() {
 
   useEffect(() => {
     if (!isAuthenticated || !userDocId || !groupId) {
-      setDayRolloverReady(false)
       return undefined
     }
 
     let cancelled = false
-    setDayRolloverReady(false)
     ;(async () => {
       try {
         await runGroupDayRollover(groupId, userDocId)
@@ -1741,7 +1742,7 @@ function App() {
       } catch (e) {
         console.error(e)
         if (!cancelled) {
-          setSyncError('Could not apply day rollover or sync standings. Check Firestore rules.')
+          setSyncError('Could not apply day rollover or sync standings. Check Supabase access policies.')
           setDayRolloverReady(true)
         }
       }
@@ -1754,7 +1755,7 @@ function App() {
 
   /** Re-sync yesterday snapshot when any crew member's history changes (late resets, retro edits). */
   useEffect(() => {
-    if (!isAuthenticated || !groupId || !leaderboardHydrated) return undefined
+    if (!isAuthenticated || !groupId || !leaderboardHydrated || !dayRolloverReady) return undefined
 
     const timer = setTimeout(async () => {
       try {
@@ -1765,7 +1766,7 @@ function App() {
     }, 400)
 
     return () => clearTimeout(timer)
-  }, [isAuthenticated, groupId, leaderboardHydrated, leaderboardRows, yesterdayYMD])
+  }, [isAuthenticated, groupId, leaderboardHydrated, dayRolloverReady, leaderboardRows, yesterdayYMD])
 
   useEffect(() => {
     if (!isAuthenticated || !groupId) return undefined
@@ -1803,7 +1804,7 @@ function App() {
             dailyCount: Math.max(0, Math.floor(Number(data.dailyCount) || 0)),
             isYou: d.id === userDocId,
             dailyGoal: getDailyGoal(data),
-            history: parseHistoryFromFirestore(data.history),
+            history: parseHistory(data.history),
             lastUpdated: data.lastUpdated ?? null,
             totalCount: Math.max(0, Math.floor(Number(data.totalCount) || 0)),
             podiums: parsePodiums(data),
@@ -1815,7 +1816,7 @@ function App() {
       },
       (err) => {
         console.error(err)
-        setSyncError('Live sync lost. Refresh or check your connection and Firestore rules.')
+        setSyncError('Live sync lost. Refresh or check your connection and Supabase Realtime settings.')
         setLeaderboardHydrated(true)
       },
     )
@@ -1842,7 +1843,7 @@ function App() {
       (err) => {
         console.error(err)
         setSyncError(
-          'Could not load group history dates. Check Firestore rules for dailyLeaderboards.',
+          'Could not load group history dates. Check Supabase access policies.',
         )
         setGroupHistoryHydrated(true)
       },
@@ -1917,13 +1918,10 @@ function App() {
 
     setIsJoining(true)
     try {
-      const groupRef = doc(db, 'groups', normalizedGroupId)
-      const groupSnap = await getDoc(groupRef)
-      if (!groupSnap.exists()) {
-        setWelcomeError('Group code not found. Ask the developer for a valid key!')
-        return
-      }
+      await ensureSignedIn()
+      await joinGroup(normalizedGroupId, name)
 
+      const groupSnap = await getDoc(doc(db, 'groups', normalizedGroupId))
       const groupNameRaw = groupSnap.data()?.groupName
       const squadLabel =
         typeof groupNameRaw === 'string' && groupNameRaw.trim()
@@ -1966,7 +1964,7 @@ function App() {
       void promptOneSignalNotifications()
     } catch (e) {
       console.error(e)
-      setWelcomeError('Could not reach Firestore. Check rules, network, and config.')
+      setWelcomeError('Could not reach Supabase. Check access policies, network, and configuration.')
     } finally {
       setIsJoining(false)
     }
@@ -1983,6 +1981,7 @@ function App() {
     setGroupId('')
     setGroupDisplayName('')
     setIsAuthenticated(false)
+    setDayRolloverReady(false)
     setActiveTab('dashboard')
     setWelcomeName('')
     setWelcomeInvite('')
@@ -2015,7 +2014,10 @@ function App() {
   }
 
   const applyPushupDelta = async (n, { clearLogInput = false } = {}) => {
-    if (!Number.isFinite(n) || n <= 0 || !userDocId) return
+    if (!Number.isSafeInteger(n) || n <= 0 || n > MAX_DAILY_COUNT || !userDocId) {
+      if (n > MAX_DAILY_COUNT) setLogError('That count is too large.')
+      return
+    }
 
     setLogError('')
     setIsLoggingPushups(true)
@@ -2038,9 +2040,15 @@ function App() {
       if (clearLogInput) setLogInput('')
 
       try {
-        const pushRes = await fetch('/.netlify/functions/send-push', {
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+        if (sessionError) throw sessionError
+        if (!session?.access_token) throw new Error('Supabase session is unavailable')
+        const pushRes = await fetch('/api/send-push', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.access_token}`,
+          },
           body: JSON.stringify({
             username: username.trim(),
             repsCount: n,
@@ -2065,7 +2073,7 @@ function App() {
 
   const saveFixedDaily = async () => {
     const newDaily = Number.parseInt(fixDraft, 10)
-    if (!Number.isFinite(newDaily) || newDaily < 0 || !userDocId) return
+    if (!Number.isSafeInteger(newDaily) || newDaily < 0 || newDaily > MAX_DAILY_COUNT || !userDocId) return
 
     setFixSaving(true)
     const ref = doc(db, 'users', userDocId)
@@ -2100,6 +2108,10 @@ function App() {
 
   const quickAddPushups = async (amount) => {
     await applyPushupDelta(amount)
+  }
+
+  if (!authReady) {
+    return <main className="grid min-h-screen place-items-center bg-slate-950 text-slate-200">Connecting…</main>
   }
 
   if (!isAuthenticated) {

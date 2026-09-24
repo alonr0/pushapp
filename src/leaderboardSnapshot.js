@@ -10,8 +10,8 @@ import {
   setDoc,
   updateDoc,
   where,
-} from 'firebase/firestore'
-import { db } from './firebase'
+} from './store'
+import { db } from './store'
 
 export function formatLocalYMD(d) {
   const y = d.getFullYear()
@@ -36,10 +36,11 @@ export function lastUpdatedToDate(ts) {
   if (!ts) return null
   if (typeof ts.toDate === 'function') return ts.toDate()
   if (ts instanceof Date) return ts
-  return null
+  const parsed = new Date(ts)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
 }
 
-function parseHistoryFromFirestore(h) {
+function parseHistory(h) {
   if (!Array.isArray(h)) return []
   return h
     .map((e) => {
@@ -73,7 +74,7 @@ export function buildArchivePatchForStaleDay(data, now = new Date()) {
   const daily = Math.max(0, Math.floor(Number(data.dailyCount) || 0))
   const goal = getDailyGoal(data)
   const archivedDate = formatLocalYMD(last)
-  const history = parseHistoryFromFirestore(data?.history)
+  const history = parseHistory(data?.history)
   const entry = {
     date: archivedDate,
     count: daily,
@@ -99,7 +100,7 @@ export function getScoreForDate(userData, dateYMD) {
   if (last && formatLocalYMD(last) === dateYMD) {
     return Math.max(0, Math.floor(Number(userData.dailyCount) || 0))
   }
-  const hist = parseHistoryFromFirestore(userData?.history)
+  const hist = parseHistory(userData?.history)
   const entry = hist.find((h) => h.date === dateYMD)
   return entry ? entry.count : 0
 }
@@ -130,7 +131,7 @@ function getDailyGoal(data) {
   return DEFAULT_DAILY_GOAL
 }
 
-/** Map live crew row from Firestore listener → shape used by getScoreForDate. */
+/** Map a live crew row to the shape used by getScoreForDate. */
 export function crewMemberToUserData(member) {
   return {
     dailyCount: member?.dailyCount ?? member?.today ?? 0,
@@ -251,7 +252,7 @@ export function buildFullGroupRankingsForDate(members, dateYMD, snapshotRankings
     const key = name.toLowerCase()
     const crewScore = scoreForCrewMember(m, dateYMD)
     const snapScore = scoreByName.get(key)
-    // Prefer live Firestore-backed score (history or un-archived dailyCount on last active day).
+    // Prefer the live score (history or un-archived dailyCount on the last active day).
     // Snapshot fills gaps only when the member has no live data for that day yet.
     const score =
       crewScore > 0 || memberHasHistoryForDate(m, dateYMD)
@@ -279,8 +280,8 @@ export function filterLeaderboardHistoryDates(dates, yesterdayYMD) {
   return dates.filter((d) => isValidArchiveDateYMD(d) && d < yesterdayYMD)
 }
 
-export function discoverGroupArchiveDates(firestoreDateIds, crewMembers) {
-  const dates = new Set(firestoreDateIds.filter(isValidArchiveDateYMD))
+export function discoverGroupArchiveDates(archiveDateIds, crewMembers) {
+  const dates = new Set(archiveDateIds.filter(isValidArchiveDateYMD))
   for (const m of crewMembers) {
     for (const h of m.history ?? []) {
       if (h?.date && isValidArchiveDateYMD(h.date) && (h.count ?? 0) > 0) {
@@ -324,7 +325,7 @@ function snapshotRef(groupId, dateYMD) {
 
 function collectScoreDatesFromUserData(data) {
   const dates = new Set()
-  for (const h of parseHistoryFromFirestore(data?.history)) {
+  for (const h of parseHistory(data?.history)) {
     if (h.count > 0) dates.add(h.date)
   }
   const last = lastUpdatedToDate(data?.lastUpdated)
@@ -591,7 +592,7 @@ export async function ensureYesterdayGroupSnapshot(groupId) {
 
 /**
  * Archives the opening user's previous calendar day into `history` and resets their dailyCount.
- * Other members stay on Firestore until they open; getScoreForDate reads their stale dailyCount.
+ * Other members stay unarchived until they open; getScoreForDate reads their stale dailyCount.
  */
 export async function applyLazyMidnightResetForUser(userId) {
   const ref = doc(db, 'users', userId)
@@ -611,7 +612,7 @@ export async function applyLazyMidnightResetForUser(userId) {
 
 /**
  * Runs when any crew member opens the app: roll over the opener's day, then rebuild
- * yesterday's group snapshot from every member's Firestore doc (not only the opener).
+ * yesterday's group snapshot from every member's user row (not only the opener).
  */
 export async function runGroupDayRollover(groupId, openingUserId) {
   const gid = groupId?.trim().toLowerCase()

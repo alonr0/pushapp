@@ -2,11 +2,21 @@ import OneSignal from 'react-onesignal'
 
 let initPromise = null
 
+function readAppId() {
+  const candidates = [
+    import.meta.env.VITE_ONESIGNAL_APP_ID,
+    import.meta.env.NEXT_PUBLIC_ONESIGNAL_APP_ID,
+  ]
+  return candidates.find((value) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim()),
+  )
+}
+
 /** Initialize once; safe to call from main.jsx and before tags/prompts. */
 export function initOneSignal() {
   if (initPromise) return initPromise
 
-  const appId = import.meta.env.VITE_ONESIGNAL_APP_ID
+  const appId = readAppId()
   if (!appId) {
     initPromise = Promise.resolve(false)
     return initPromise
@@ -26,7 +36,7 @@ export function initOneSignal() {
   return initPromise
 }
 
-/** Associate this device with the active Firestore group for push filters. */
+/** Associate this device with the active group for push filters. */
 export async function syncOneSignalGroupTag(groupId) {
   const ready = await initOneSignal()
   if (!ready) return

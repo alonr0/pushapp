@@ -1,5 +1,5 @@
-import { collection, doc, getDoc, getDocs, query, updateDoc, where } from 'firebase/firestore'
-import { db } from './firebase'
+import { collection, doc, getDoc, getDocs, query, updateDoc, where } from './store'
+import { db } from './store'
 import { DEFAULT_DAILY_GOAL, formatLocalYMD, isValidArchiveDateYMD } from './leaderboardSnapshot'
 
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -16,7 +16,7 @@ export function getUserDailyGoal(data) {
   return DEFAULT_DAILY_GOAL
 }
 
-/** Full Firestore history row with goal fields (no undefined). */
+/** Full history row with goal fields (no undefined). */
 export function buildHistoryEntry({ date, count, goalAtDayEnd }) {
   const goal = Math.max(1, Math.floor(Number(goalAtDayEnd) || DEFAULT_DAILY_GOAL))
   const c = Math.max(0, Math.floor(Number(count) || 0))
@@ -86,7 +86,7 @@ export function parseRetroDateInput(input) {
 }
 
 /**
- * Add or replace one day in a user's history (Firestore).
+ * Add or replace one day in a user's history.
  * @param {object} opts
  * @param {number} [opts.goal] — omit to use the user's current dailyGoal
  */

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { promptOneSignalNotifications, syncOneSignalGroupTag } from './onesignal'
 import {
   joinWorkoutGroup,
@@ -50,7 +50,16 @@ function PreferenceControls({ language, setLanguage, theme, setTheme, t }) {
         aria-label={theme === 'light' ? t('darkTheme') : t('lightTheme')}
         title={theme === 'light' ? t('darkTheme') : t('lightTheme')}
       >
-        <span aria-hidden>{theme === 'light' ? '☾' : '☀'}</span>
+        <svg className="theme-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          {theme === 'light' ? (
+            <path d="M20.2 15.4A8.3 8.3 0 0 1 8.6 3.8 8.5 8.5 0 1 0 20.2 15.4Z" />
+          ) : (
+            <>
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+            </>
+          )}
+        </svg>
         <span className="theme-button-label">{theme === 'light' ? t('darkTheme') : t('lightTheme')}</span>
       </button>
     </div>
@@ -240,9 +249,6 @@ function AuthScreen({ language, theme, setLanguage, setTheme, t }) {
             <button type="button" className="provider-button" onClick={() => signInWithProvider('google')} disabled={busy}>
               <span className="provider-g" aria-hidden>G</span>{t('google')}
             </button>
-            <button type="button" className="provider-button" onClick={() => signInWithProvider('apple')} disabled={busy}>
-              <span className="provider-apple" aria-hidden>●</span>{t('apple')}
-            </button>
           </div>
           <button
             type="button"
@@ -382,11 +388,20 @@ function GroupJoinScreen({ session, profiles, onJoined, onSignOut, t }) {
 }
 
 function ExerciseRow({ exercise, reps, busy, onLog, t, language }) {
-  const [amount, setAmount] = useState('5')
+  const [amount, setAmount] = useState('')
   const [error, setError] = useState('')
+  const dialogRef = useRef(null)
+  const inputRef = useRef(null)
   const remaining = exercise.limit - reps
   const percentage = Math.round((reps / exercise.limit) * 100)
   const categoryPoints = Math.round((25 * reps / exercise.limit) * 10) / 10
+
+  const openDialog = () => {
+    setAmount('')
+    setError('')
+    dialogRef.current?.showModal()
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }
 
   const submit = async (event) => {
     event.preventDefault()
@@ -398,7 +413,7 @@ function ExerciseRow({ exercise, reps, busy, onLog, t, language }) {
     setError('')
     try {
       await onLog(exercise.id, value)
-      setAmount(String(Math.min(5, exercise.limit - reps - value) || 1))
+      dialogRef.current?.close()
     } catch (logError) {
       setError(logError?.message?.includes('exceed') ? t('invalidReps') : t('saveError'))
     }
@@ -430,34 +445,69 @@ function ExerciseRow({ exercise, reps, busy, onLog, t, language }) {
         {remaining > 0 ? (
           <>
             <span className="remaining-count">{remaining} {t('left')}</span>
-            <form className="rep-form" onSubmit={submit}>
-              <input
-                aria-label={`${t('add')} ${exerciseLabel(language, exercise.id)}`}
-                type="number"
-                inputMode="numeric"
-                min="1"
-                max={remaining}
-                step="1"
-                value={amount}
-                onChange={(event) => setAmount(event.target.value)}
-                disabled={busy}
-              />
-              <button
-                className="small-primary"
-                type="submit"
-                aria-label={`${t('add')} ${exerciseLabel(language, exercise.id)}`}
-                disabled={busy}
-              >
-                {busy ? '…' : '+'}
-                <span>{t('add')}</span>
-              </button>
-            </form>
+            <button
+              className="add-reps-button"
+              type="button"
+              aria-label={`${t('add')} ${exerciseLabel(language, exercise.id)}`}
+              title={`${t('add')} ${exerciseLabel(language, exercise.id)}`}
+              onClick={openDialog}
+              disabled={busy}
+            >
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+            <dialog
+              ref={dialogRef}
+              className="rep-dialog"
+              aria-labelledby={`rep-dialog-title-${exercise.id}`}
+              onClose={() => setError('')}
+            >
+              <form className="rep-dialog-form" onSubmit={submit}>
+                <h2 id={`rep-dialog-title-${exercise.id}`}>{exerciseLabel(language, exercise.id)}</h2>
+                <p className="rep-dialog-copy">{remaining} {t('left')}</p>
+                <label htmlFor={`rep-input-${exercise.id}`}>{t('repsToLog')}</label>
+                <input
+                  ref={inputRef}
+                  id={`rep-input-${exercise.id}`}
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  max={remaining}
+                  step="1"
+                  required
+                  value={amount}
+                  onChange={(event) => {
+                    setAmount(event.target.value)
+                    setError('')
+                  }}
+                  onInvalid={(event) => {
+                    event.preventDefault()
+                    setError(t('invalidReps'))
+                  }}
+                  disabled={busy}
+                />
+                {error && <p className="inline-error" role="alert">{error}</p>}
+                <div className="rep-dialog-actions">
+                  <button
+                    className="quiet-button"
+                    type="button"
+                    onClick={() => dialogRef.current?.close()}
+                    disabled={busy}
+                  >
+                    {t('cancel')}
+                  </button>
+                  <button className="primary-button" type="submit" disabled={busy || !amount}>
+                    {busy ? t('loading') : t('add')}
+                  </button>
+                </div>
+              </form>
+            </dialog>
           </>
         ) : (
           <span className="complete-label">{t('maxed')} <b>+2</b></span>
         )}
       </div>
-      {error && <p className="inline-error" role="alert">{error}</p>}
     </article>
   )
 }
@@ -806,7 +856,10 @@ export default function WorkoutApp() {
                 <span className="summary-max">{t('dailyMax')}</span>
               </div>
               <div className="summary-side">
-                <span className="streak-flame" aria-hidden>✳</span>
+                <svg className="streak-flame" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 22c4.1 0 7-2.8 7-6.7 0-3.3-2-5.7-4.1-7.8.1 2.3-.8 3.8-2 4.7C13 8.3 10.5 5 8.5 2.5c.3 3.8-.3 5.7-2.2 8A7.4 7.4 0 0 0 5 15.3C5 19.2 7.8 22 12 22Z" />
+                  <path d="M12 19a3 3 0 0 0 3-3c0-1.4-.9-2.5-2.1-3.7-.2 1.1-.7 1.8-1.6 2.4-.5-.7-1-1.1-1.7-1.5-.3.7-.6 1.4-.6 2.4a3.1 3.1 0 0 0 3 3.4Z" />
+                </svg>
                 <strong>{myStreak}</strong>
                 <span>{t('streak')}</span>
               </div>

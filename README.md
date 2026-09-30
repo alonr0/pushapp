@@ -6,7 +6,7 @@ Mobile-friendly exercise tracker for crews. The active season scores push-ups, p
 
 - Node.js 20.19+ (Vite 8)
 - Supabase project with all migrations in `supabase/migrations/` applied in timestamp order
-- Email Auth enabled; Google and Apple providers enabled with provider credentials
+- Email Auth enabled; Google provider enabled with credentials
 - Auth redirect URLs configured for local development and production
 - A custom SMTP provider for dependable production confirmation, magic-link, and recovery email delivery
 
@@ -49,7 +49,7 @@ Never put a Supabase secret or service-role key in a browser-exposed variable. T
 
 Apply all files in `supabase/migrations/` in timestamp order. The initial migration remains the legacy baseline; later migrations add the active score model and forward fixes while preserving legacy tables and rows. Active scores start at zero. The database uses `Asia/Jerusalem` for activity dates and enforces caps, scoring, membership authorization, and RLS.
 
-Enable email/password and email OTP in **Authentication → Providers**. Enable Google and Apple there and configure each provider's credentials and callback URL. Add the app's local and production origins to **Authentication → URL Configuration → Redirect URLs**. Email reset links return to the app origin.
+Enable email/password and email OTP in **Authentication → Providers**. Enable Google there and configure its credentials and callback URL. Add the app's local and production origins to **Authentication → URL Configuration → Redirect URLs**. Email reset links return to the app origin.
 
 To use numeric email codes as well as magic links, customize the Magic Link email template to include `{{ .Token }}`. Without that template change, the app's link flow still works.
 

@@ -1,11 +1,11 @@
 {
   "name": "PushApp",
   "short_name": "PushApp",
-  "description": "Track pushups with your crew",
+  "description": "Track push-ups, pull-ups, crunches, and squats with your crew",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#020617",
-  "theme_color": "#020617",
+  "background_color": "#f2f5ef",
+  "theme_color": "#f2f5ef",
   "icons": [
     {
       "src": "/logo.png",

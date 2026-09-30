@@ -108,7 +108,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 .quiet-button:hover, .provider-button:hover, .profile-choice:hover { border-color: var(--accent); }
-.theme-button > span:first-child { color: var(--warm); font-size: 16px; }
+.theme-icon { width: 16px; height: 16px; flex: 0 0 auto; color: var(--warm); stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 
 .auth-layout { min-height: 100dvh; }
 .auth-content {
@@ -138,7 +138,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .auth-form { display: grid; gap: 13px; }
 .otp-entry { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
 .auth-form label, .group-switcher { display: grid; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
-.auth-form input, .group-switcher select, .rep-form input {
+.auth-form input, .group-switcher select, .rep-dialog input {
 	width: 100%;
 	min-height: 46px;
 	border: 1px solid var(--line);
@@ -148,7 +148,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 	color: var(--ink);
 }
 
-.primary-button, .small-primary {
+.primary-button {
 	border: 0;
 	border-radius: 11px;
 	background: var(--accent);
@@ -159,9 +159,9 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 .primary-button { min-height: 48px; margin-top: 3px; padding: 0 16px; }
-.primary-button:hover, .small-primary:hover { filter: brightness(1.06); }
-.primary-button:active, .small-primary:active { transform: translateY(1px); }
-.primary-button:disabled, .small-primary:disabled, .provider-button:disabled { cursor: wait; opacity: .65; }
+.primary-button:hover { filter: brightness(1.06); }
+.primary-button:active { transform: translateY(1px); }
+.primary-button:disabled, .provider-button:disabled { cursor: wait; opacity: .65; }
 
 .text-button {
 	min-height: 40px;
@@ -224,7 +224,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .summary-max { color: var(--muted); font-size: 12px; }
 .summary-side { display: grid; min-width: 85px; justify-items: center; gap: 2px; border-inline-start: 1px solid var(--line); padding-inline-start: 18px; color: var(--muted); font-size: 11px; }
 .summary-side strong { color: var(--ink); font-size: 22px; font-variant-numeric: tabular-nums; }
-.streak-flame { color: var(--warm); font-size: 18px; }
+.streak-flame { width: 19px; height: 19px; color: var(--warm); stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .bonus-line { display: flex; justify-content: space-between; gap: 10px; padding-inline: 3px; color: var(--muted); font-size: 12px; }
 .bonus-line b { margin-inline-start: 4px; color: var(--ink); font-variant-numeric: tabular-nums; }
 .streak-hint { margin: 0; color: var(--muted); font-size: 11px; }
@@ -247,10 +247,21 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .exercise-complete .progress-track span { background: var(--warm); }
 .exercise-footer { display: flex; min-height: 39px; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
 .remaining-count { color: var(--muted); font-size: 11px; }
-.rep-form { display: flex; align-items: center; gap: 7px; }
-.rep-form input { width: 70px; min-height: 34px; border-radius: 9px; padding: 0 8px; text-align: center; font-size: 13px; font-variant-numeric: tabular-nums; }
-.small-primary { display: inline-flex; min-height: 34px; align-items: center; justify-content: center; gap: 6px; border-radius: 9px; padding: 0 11px; font-size: 15px; }
-.small-primary span { font-size: 11px; }
+.add-reps-button { display: grid; width: 40px; height: 40px; flex: 0 0 auto; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--line)); border-radius: 50%; background: var(--accent-soft); color: var(--accent-strong); cursor: pointer; transition: background-color 140ms ease, transform 140ms ease; }
+.add-reps-button:hover { background: var(--surface-soft); }
+.add-reps-button:active { transform: scale(.96); }
+.add-reps-button:disabled { cursor: wait; opacity: .65; }
+.add-reps-button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 2px; }
+.add-reps-button svg { width: 19px; height: 19px; stroke: currentColor; stroke-linecap: round; stroke-width: 2; }
+.rep-dialog { width: min(360px, calc(100% - 32px)); max-width: none; margin: auto; border: 1px solid var(--line); border-radius: 14px; padding: 20px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.rep-dialog::backdrop { background: rgb(20 30 22 / 46%); backdrop-filter: blur(3px); }
+.rep-dialog-form { display: grid; gap: 13px; }
+.rep-dialog-form h2 { margin: 0; font-size: 18px; }
+.rep-dialog-copy { margin: -7px 0 0; color: var(--muted); font-size: 12px; }
+.rep-dialog-form label { color: var(--muted); font-size: 12px; font-weight: 700; }
+.rep-dialog input { min-height: 48px; font-size: 16px; font-variant-numeric: tabular-nums; }
+.rep-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 3px; }
+.rep-dialog-actions .primary-button, .rep-dialog-actions .quiet-button { min-height: 42px; margin: 0; border-radius: 9px; }
 .complete-label { color: var(--accent); font-size: 11px; font-weight: 800; }
 .complete-label b { margin-inline-start: 5px; color: var(--warm); }
 .inline-error { margin: 6px 0 0; color: var(--error); font-size: 11px; }
@@ -321,7 +332,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 	.daily-summary { padding: 17px; }
 	.summary-main strong { font-size: 38px; }
 	.exercise-row { padding-inline: 13px; }
-	.small-primary span { display: none; }
 	.standing-row { grid-template-columns: 22px minmax(0, 1fr) 36px 48px; gap: 6px; }
 }
 

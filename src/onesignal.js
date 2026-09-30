@@ -15,6 +15,10 @@ function readAppId() {
 /** Initialize once; safe to call from main.jsx and before tags/prompts. */
 export function initOneSignal() {
   if (initPromise) return initPromise
+  if (import.meta.env.DEV) {
+    initPromise = Promise.resolve(false)
+    return initPromise
+  }
 
   const appId = readAppId()
   if (!appId) {

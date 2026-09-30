@@ -4,8 +4,8 @@
  * Usage:
  *   npm run check:totals -- <group-id>
  */
-import { collection, getDocs, query, where } from 'firebase/firestore'
-import { db } from '../src/firebase.js'
+import { collection, getDocs, query, where, joinGroup } from '../src/store.js'
+import { db } from '../src/store.js'
 import { formatLocalYMD, lastUpdatedToDate } from '../src/leaderboardSnapshot.js'
 
 const groupId = process.argv[2]?.trim().toLowerCase()
@@ -15,6 +15,7 @@ if (!groupId) {
 }
 
 const todayYMD = formatLocalYMD(new Date())
+await joinGroup(groupId, 'PushApp admin')
 
 function parseHistory(h) {
   if (!Array.isArray(h)) return []

@@ -5,6 +5,7 @@
  *   npm run backfill:group -- ketty789
  */
 import { backfillGroupDailyLeaderboards } from '../src/leaderboardSnapshot.js'
+import { joinGroup } from '../src/store.js'
 
 const groupId = process.argv[2]?.trim().toLowerCase()
 
@@ -15,6 +16,7 @@ if (!groupId) {
 }
 
 console.log(`Backfilling dailyLeaderboards for group "${groupId}"…`)
+await joinGroup(groupId, 'PushApp admin')
 console.log('(Podium counts are not updated for past days.)\n')
 
 const summary = await backfillGroupDailyLeaderboards(groupId, {

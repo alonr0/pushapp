@@ -13,6 +13,7 @@ import {
   rebuildGroupSnapshotForDate,
   syncGroupSnapshotForDate,
 } from '../src/leaderboardSnapshot.js'
+import { joinGroup } from '../src/store.js'
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
@@ -32,6 +33,7 @@ try {
   console.error(err instanceof Error ? err.message : String(err))
   process.exit(1)
 }
+await joinGroup(groupId, 'PushApp admin')
 
 console.log(`Group: ${groupId}`)
 console.log(`Date:  ${dateYMD}`)

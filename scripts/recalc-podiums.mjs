@@ -6,6 +6,7 @@
  *   npm run recalc:podiums -- ketty789 --dry-run
  */
 import { recalcGroupPodiumsFromSnapshots } from '../src/leaderboardSnapshot.js'
+import { joinGroup } from '../src/store.js'
 
 const args = process.argv.slice(2).filter((a) => a !== '--dry-run')
 const dryRun = process.argv.includes('--dry-run')
@@ -20,6 +21,7 @@ if (!groupId) {
 console.log(
   dryRun ? `[dry-run] Recalculating podiums for "${groupId}"…` : `Recalculating podiums for "${groupId}"…`,
 )
+await joinGroup(groupId, 'PushApp admin')
 console.log('(Uses finished days only — today is excluded.)\n')
 
 const summary = await recalcGroupPodiumsFromSnapshots(groupId, {
@@ -44,5 +46,5 @@ for (const u of summary.podiumsByUser) {
   console.log(`    ${u.name}: 🥇${first} 🥈${second} 🥉${third}`)
 }
 
-if (dryRun) console.log('\n[dry-run] No Firestore writes.')
+if (dryRun) console.log('\n[dry-run] No Supabase writes.')
 process.exit(0)

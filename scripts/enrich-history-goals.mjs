@@ -5,6 +5,7 @@
  *   npm run enrich:history -- <group-id> [--dry-run]
  */
 import { enrichGroupHistoryGoals } from '../src/retroHistory.js'
+import { joinGroup } from '../src/store.js'
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
@@ -15,6 +16,7 @@ if (!groupId) {
   process.exit(1)
 }
 
+await joinGroup(groupId, 'PushApp admin')
 const result = await enrichGroupHistoryGoals(groupId, { dryRun })
 
 console.log(dryRun ? '[dry-run] ' : '', `Group "${result.groupId}"`)

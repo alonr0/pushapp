@@ -7,8 +7,8 @@
  * Example (subtract 75):
  *   npm run fix:total -- ketty789 דביר -75
  */
-import { doc, getDoc, updateDoc } from 'firebase/firestore'
-import { db } from '../src/firebase.js'
+import { doc, getDoc, updateDoc, joinGroup } from '../src/store.js'
+import { db } from '../src/store.js'
 
 const [groupId, displayName, deltaStr] = process.argv.slice(2)
 if (!groupId || !displayName || deltaStr === undefined) {
@@ -25,6 +25,7 @@ if (!Number.isFinite(delta)) {
 import { toUserDocumentId } from '../src/retroHistory.js'
 
 const userDocId = toUserDocumentId(displayName, groupId)
+await joinGroup(groupId, displayName)
 const ref = doc(db, 'users', userDocId)
 const snap = await getDoc(ref)
 if (!snap.exists()) {

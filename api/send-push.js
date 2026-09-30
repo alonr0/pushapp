@@ -20,14 +20,21 @@ export default async function handler(request, response) {
   try {
     const body = typeof request.body === 'string' ? JSON.parse(request.body || '{}') : request.body || {}
     const username = String(body.username || '').trim()
-    const repsCount = Math.max(0, Math.floor(Number(body.repsCount) || 0))
+    const repsCount = Number(body.repsCount)
+    const exerciseId = String(body.exerciseId || 'pushups')
+    const language = body.language === 'he' ? 'he' : 'en'
+    const exerciseLimits = { pushups: 100, pullups: 50, crunches: 150, squats: 150 }
+    const exerciseName = {
+      en: { pushups: 'push-ups', pullups: 'pull-ups', crunches: 'crunches', squats: 'squats' },
+      he: { pushups: 'שכיבות סמיכה', pullups: 'מתח', crunches: 'כפיפות בטן', squats: 'סקוואטים' },
+    }
     const groupName = String(body.groupName || '').trim() || 'your crew'
     const currentGroupId = String(body.currentGroupId || '').trim().toLowerCase()
     const accessToken = String(request.headers.authorization || '').match(/^Bearer\s+(.+)$/i)?.[1]
 
-    if (!username || !Number.isSafeInteger(repsCount) || repsCount <= 0 || repsCount > 2_147_483_647 || !currentGroupId || !accessToken) {
+    if (!username || !Number.isSafeInteger(repsCount) || repsCount <= 0 || repsCount > (exerciseLimits[exerciseId] || 0) || !currentGroupId || !accessToken) {
       return response.status(400).json({
-        error: 'A Supabase session, username, repsCount (> 0), and currentGroupId are required',
+        error: 'A valid session, exercise, count within its daily limit, username, and group are required',
       })
     }
 
@@ -73,7 +80,11 @@ export default async function handler(request, response) {
         app_id: appId,
         target_channel: 'push',
         headings: { en: 'PushApp Alert! 🔥' },
-        contents: { en: `${membership.display_name} just logged ${repsCount} pushups in ${groupName}!` },
+        contents: {
+          [language]: language === 'he'
+            ? `${membership.display_name} הוסיף/ה ${repsCount} ${exerciseName.he[exerciseId]} בקבוצה ${groupName}`
+            : `${membership.display_name} logged ${repsCount} ${exerciseName.en[exerciseId]} in ${groupName}`,
+        },
         filters: [{ field: 'tag', key: 'groupId', relation: '=', value: currentGroupId }],
       }),
     })

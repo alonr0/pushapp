@@ -4,7 +4,7 @@
  * Usage (from project root, with .env.local):
  *   npm run retro:day -- <group-id> <display-name> <date> <count> [goal]
  *
- * Goal is optional — defaults to the user's current dailyGoal in Firestore.
+ * Goal is optional — defaults to the user's current daily goal.
  *
  * Examples:
  *   npm run retro:day -- ketty789 אלמוג 16-5 120 100
@@ -13,6 +13,7 @@
  */
 import { rebuildGroupSnapshotForDate } from '../src/leaderboardSnapshot.js'
 import { parseRetroDateInput, upsertUserHistoryDay } from '../src/retroHistory.js'
+import { joinGroup } from '../src/store.js'
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
@@ -35,6 +36,7 @@ try {
   console.error(err instanceof Error ? err.message : String(err))
   process.exit(1)
 }
+await joinGroup(groupId, displayName)
 
 const count = Number.parseInt(countStr, 10)
 if (!Number.isFinite(count) || count < 0) {
@@ -82,7 +84,7 @@ try {
   }
 
   if (dryRun) {
-    console.log('\n[dry-run] Skipped Firestore writes.')
+    console.log('\n[dry-run] Skipped Supabase writes.')
     process.exit(0)
   }
 

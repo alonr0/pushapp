@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { promptOneSignalNotifications, syncOneSignalGroupTag } from './onesignal'
 import {
   joinWorkoutGroup,
+  leaveWorkoutGroup,
   listWorkoutProfiles,
   logWorkoutReps,
   readWorkoutGroup,
@@ -329,10 +330,11 @@ function PasswordRecoveryScreen({ language, theme, setLanguage, setTheme, onComp
   )
 }
 
-function GroupJoinScreen({ session, profiles, onJoined, onSignOut, t }) {
+function GroupJoinScreen({ session, profiles, onJoined, onLeave, onCancel, onSignOut, t }) {
   const [displayName, setDisplayName] = useState(session.user.user_metadata?.full_name || '')
   const [groupCode, setGroupCode] = useState('')
   const [busy, setBusy] = useState(false)
+  const [leavingGroupId, setLeavingGroupId] = useState('')
   const [error, setError] = useState('')
 
   const submit = async (event) => {
@@ -349,21 +351,49 @@ function GroupJoinScreen({ session, profiles, onJoined, onSignOut, t }) {
     }
   }
 
+  const handleLeave = async (groupId) => {
+    if (!window.confirm(t('leaveCrewConfirm'))) return
+    setLeavingGroupId(groupId)
+    setError('')
+    try {
+      await onLeave(groupId)
+    } catch (leaveError) {
+      setError(leaveError?.message || t('leaveCrewError'))
+    } finally {
+      setLeavingGroupId('')
+    }
+  }
+
   return (
     <main className="auth-layout">
       <section className="auth-content join-content">
         <div className="auth-intro">
           <div className="auth-kicker">{t('welcome')}</div>
-          <h1>{t('joinCrew')}</h1>
-          <p>{t('joinPrompt')}</p>
+          <h1>{profiles.length ? t('manageCrews') : t('joinCrew')}</h1>
+          <p>{profiles.length ? t('manageCrewsPrompt') : t('joinPrompt')}</p>
         </div>
         {profiles.length > 0 && (
           <div className="profile-list">
-            {profiles.map((profile) => (
-              <button key={profile.group_id} type="button" className="profile-choice" onClick={() => void onJoined(profile.group_id)}>
-                <span>{profile.display_name}</span>
-                <small>{profile.group_id}</small>
-              </button>
+            {profiles.map((crewProfile) => (
+              <div key={crewProfile.group_id} className="profile-choice-row">
+                <button
+                  type="button"
+                  className="profile-choice"
+                  onClick={() => void onJoined(crewProfile.group_id)}
+                  disabled={busy || Boolean(leavingGroupId)}
+                >
+                  <span>{crewProfile.display_name}</span>
+                  <small>{crewProfile.group_id}</small>
+                </button>
+                <button
+                  type="button"
+                  className="text-button leave-group-button"
+                  onClick={() => void handleLeave(crewProfile.group_id)}
+                  disabled={busy || Boolean(leavingGroupId)}
+                >
+                  {leavingGroupId === crewProfile.group_id ? t('loading') : t('leaveCrew')}
+                </button>
+              </div>
             ))}
           </div>
         )}
@@ -380,6 +410,7 @@ function GroupJoinScreen({ session, profiles, onJoined, onSignOut, t }) {
           <button className="primary-button" type="submit" disabled={busy}>
             {busy ? t('loading') : t('joinCrew')}
           </button>
+          {onCancel && <button className="text-button" type="button" onClick={onCancel}>{t('cancel')}</button>}
           <button className="text-button" type="button" onClick={onSignOut}>{t('signOut')}</button>
         </form>
       </section>
@@ -542,6 +573,7 @@ export default function WorkoutApp() {
   const [passwordRecovery, setPasswordRecovery] = useState(false)
   const [authReady, setAuthReady] = useState(false)
   const [profileState, setProfileState] = useState({ userId: '', profiles: [] })
+  const [groupJoinOpen, setGroupJoinOpen] = useState(false)
   const [activeGroupId, setActiveGroupId] = useState(() => readPreference(ACTIVE_GROUP_KEY, ''))
   const [groupData, setGroupData] = useState({ groupId: '', profiles: [], scores: [], rewards: [] })
   const [loadedGroupId, setLoadedGroupId] = useState('')
@@ -652,6 +684,7 @@ export default function WorkoutApp() {
   const handleJoined = async (groupId) => {
     const nextProfiles = await listWorkoutProfiles(session.user.id)
     setProfileState({ userId: session.user.id, profiles: nextProfiles })
+    setGroupJoinOpen(false)
     const nextProfile = nextProfiles.find((item) => item.group_id === groupId)
     if (!nextProfile) throw new Error(t('setupError'))
     setActiveGroupId(groupId)
@@ -662,6 +695,27 @@ export default function WorkoutApp() {
     }
     await syncOneSignalGroupTag(groupId)
     void promptOneSignalNotifications()
+  }
+
+  const handleLeaveGroup = async (groupId) => {
+    await leaveWorkoutGroup(groupId)
+    const nextProfiles = await listWorkoutProfiles(session.user.id)
+    setProfileState({ userId: session.user.id, profiles: nextProfiles })
+
+    if (profile?.group_id !== groupId) return
+
+    const nextGroupId = nextProfiles[0]?.group_id || ''
+    setActiveGroupId(nextGroupId)
+    setLoadedGroupId('')
+    setGroupData({ groupId: '', profiles: [], scores: [], rewards: [] })
+    setDataError('')
+    try {
+      if (nextGroupId) localStorage.setItem(ACTIVE_GROUP_KEY, nextGroupId)
+      else localStorage.removeItem(ACTIVE_GROUP_KEY)
+    } catch {
+      // Crew state still updates for this session if storage is unavailable.
+    }
+    await syncOneSignalGroupTag(nextGroupId)
   }
 
   useEffect(() => {
@@ -776,6 +830,7 @@ export default function WorkoutApp() {
   }
 
   const signOut = async () => {
+    setGroupJoinOpen(false)
     await supabase.auth.signOut()
   }
 
@@ -808,7 +863,7 @@ export default function WorkoutApp() {
     )
   }
 
-  if (!profile) {
+  if (!profile || groupJoinOpen) {
     return (
       <>
         <Brand language={language} theme={theme} setLanguage={setLanguage} setTheme={setTheme} t={t} />
@@ -816,6 +871,8 @@ export default function WorkoutApp() {
           session={session}
           profiles={profiles}
           onJoined={handleJoined}
+          onLeave={handleLeaveGroup}
+          onCancel={profile ? () => setGroupJoinOpen(false) : undefined}
           onSignOut={signOut}
           t={t}
         />
@@ -835,14 +892,19 @@ export default function WorkoutApp() {
         <button type="button" className="quiet-button signout-button" onClick={signOut}>{t('signOut')}</button>
       </header>
 
-      {profiles.length > 1 && (
-        <label className="group-switcher">
-          <span>{t('groupCode')}</span>
-          <select value={profile.group_id} onChange={(event) => selectGroup(event.target.value)}>
-            {profiles.map((item) => <option key={item.group_id} value={item.group_id}>{item.group_id}</option>)}
-          </select>
-        </label>
-      )}
+      <div className="crew-toolbar">
+        {profiles.length > 1 && (
+          <label className="group-switcher">
+            <span>{t('groupCode')}</span>
+            <select value={profile.group_id} onChange={(event) => selectGroup(event.target.value)}>
+              {profiles.map((item) => <option key={item.group_id} value={item.group_id}>{item.group_id}</option>)}
+            </select>
+          </label>
+        )}
+        <button type="button" className="quiet-button" onClick={() => setGroupJoinOpen(true)}>
+          {t('manageCrews')}
+        </button>
+      </div>
 
       {dataError && <p className="notice notice-error page-notice" role="alert">{dataError}</p>}
 

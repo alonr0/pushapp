@@ -46,8 +46,11 @@ export async function syncOneSignalGroupTag(groupId) {
   if (!ready) return
 
   const gid = String(groupId || '').trim().toLowerCase()
-  if (!gid) return
   try {
+    if (!gid) {
+      await OneSignal.User.removeTag('groupId')
+      return
+    }
     await OneSignal.User.addTag('groupId', gid)
   } catch (err) {
     console.warn('OneSignal group tag sync failed:', err)

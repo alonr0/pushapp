@@ -18,6 +18,13 @@ export async function joinWorkoutGroup(groupId, displayName) {
   if (error) throw error
 }
 
+export async function leaveWorkoutGroup(groupId) {
+  const { error } = await supabase.rpc('leave_group', {
+    requested_group_id: groupId.trim().toLowerCase(),
+  })
+  if (error) throw error
+}
+
 export async function readWorkoutGroup(groupId) {
   const [profilesResult, scoresResult, rewardsResult] = await Promise.all([
     supabase

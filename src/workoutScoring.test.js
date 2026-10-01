@@ -34,13 +34,11 @@ test('day score awards category and all-category bonuses up to 118', () => {
   assert.equal(partial.qualifiesForStreak, false)
 })
 
-test('streak qualification uses base points before bonuses at the 60-point boundary', () => {
-  const below = scoreDay({ pushups: 100, pullups: 50, crunches: 59 })
-  const threshold = scoreDay({ pushups: 100, pullups: 50, crunches: 60 })
-  assert.equal(below.basePoints, 59.8)
-  assert.equal(below.qualifiesForStreak, false)
-  assert.equal(threshold.basePoints, 60)
-  assert.equal(threshold.qualifiesForStreak, true)
+test('streak qualification requires at least one rep in every exercise', () => {
+  const oneRepEach = scoreDay({ pushups: 1, pullups: 1, crunches: 1, squats: 1 })
+  const missingOneExercise = scoreDay({ pushups: 1, pullups: 1, crunches: 1 })
+  assert.equal(oneRepEach.qualifiesForStreak, true)
+  assert.equal(missingOneExercise.qualifiesForStreak, false)
 })
 
 test('invalid exercise counts are rejected instead of clipped', () => {
@@ -61,12 +59,12 @@ test('streak points accrue for every completed seven-day run block', () => {
   )
 })
 
-test('current streak starts today or yesterday and uses qualifying base points', () => {
+test('current streak starts today or yesterday and uses all-exercise completion', () => {
   const rows = [
-    { user_id: 'member', activity_date: '2026-09-27', base_points: 60 },
-    { user_id: 'member', activity_date: '2026-09-28', base_points: 59.9 },
-    { user_id: 'member', activity_date: '2026-09-29', base_points: 60 },
-    { user_id: 'other', activity_date: '2026-09-29', base_points: 100 },
+    { user_id: 'member', activity_date: '2026-09-27', pushups_reps: 1, pullups_reps: 1, crunches_reps: 1, squats_reps: 1 },
+    { user_id: 'member', activity_date: '2026-09-28', pushups_reps: 1, pullups_reps: 1, crunches_reps: 0, squats_reps: 1 },
+    { user_id: 'member', activity_date: '2026-09-29', pushups_reps: 1, pullups_reps: 1, crunches_reps: 1, squats_reps: 1 },
+    { user_id: 'other', activity_date: '2026-09-29', pushups_reps: 1, pullups_reps: 1, crunches_reps: 1, squats_reps: 1 },
   ]
   assert.equal(currentStreakDays(rows, 'member', '2026-09-29'), 1)
   assert.equal(currentStreakDays(rows, 'member', '2026-09-30'), 1)

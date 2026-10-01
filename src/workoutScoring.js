@@ -8,7 +8,6 @@ export const EXERCISES = [
 export const BASE_POINTS_PER_EXERCISE = 25
 export const CATEGORY_COMPLETION_BONUS = 2
 export const ALL_CATEGORIES_BONUS = 10
-export const STREAK_THRESHOLD = 60
 export const STREAK_BLOCK_DAYS = 7
 export const STREAK_BLOCK_POINTS = 5
 export const ISRAEL_TIME_ZONE = 'Asia/Jerusalem'
@@ -43,7 +42,7 @@ export function scoreDay(repsByExercise) {
     categoryBonus,
     allCategoriesBonus,
     dailyPoints: basePoints + categoryBonus + allCategoriesBonus,
-    qualifiesForStreak: basePoints >= STREAK_THRESHOLD,
+    qualifiesForStreak: EXERCISES.every(({ id }) => reps[id] >= 1),
   }
 }
 
@@ -83,7 +82,7 @@ export function getIsraelDate(date = new Date()) {
 export function currentStreakDays(dailyRows, userId, today = getIsraelDate()) {
   const qualifyingDates = new Set(
     dailyRows
-      .filter((row) => row.user_id === userId && Number(row.base_points) >= STREAK_THRESHOLD)
+      .filter((row) => row.user_id === userId && EXERCISES.every(({ id }) => Number(row[`${id}_reps`]) >= 1))
       .map((row) => row.activity_date),
   )
   const cursor = new Date(`${today}T12:00:00Z`)

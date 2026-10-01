@@ -49,7 +49,7 @@ const messages = {
     logging: 'Saving…',
     dailyMax: '118 points available today',
     streak: 'day streak',
-    streakProgress: 'Qualify with 60 exercise points',
+    streakProgress: 'Do at least 1 rep in each exercise to keep your streak',
     nextStreak: 'Next streak reward',
     allFour: 'All four complete',
     ranking: 'Today’s points',
@@ -66,6 +66,22 @@ const messages = {
     English: 'English',
     Hebrew: 'עברית',
     settings: 'Preferences',
+    rules: 'Rules',
+    newFeatures: 'What’s new',
+    welcomeTitle: 'Welcome to the new PushApp',
+    welcomeMessage: 'Here are the latest features and the rules for your daily challenge.',
+    featuresHeading: 'New features',
+    featureScoring: 'Earn points as you log reps, with bonuses for completing exercises.',
+    featureStreak: 'Build a daily streak and earn a reward for every seven qualifying days.',
+    featureCrew: 'Follow your crew standings and your activity history.',
+    rulesTitle: 'Challenge rules',
+    rulesHeading: 'Daily rules',
+    rulesCaps: ({ exercises }) => `Daily limits: ${exercises} reps.`,
+    rulesStreak: 'Log at least 1 rep in all four exercises on a day to qualify for your streak.',
+    rulesScoring: 'Each exercise is worth up to 25 points, scaled to its daily limit.',
+    rulesBonuses: 'Earn 2 bonus points for each exercise limit reached, plus 10 when all four are complete. Maximum: 118 points per day.',
+    startNow: 'Let’s go',
+    close: 'Close',
     loading: 'Getting things ready…',
     saveError: 'Could not save that. Please try again.',
     authError: 'We could not sign you in. Check your details and try again.',
@@ -126,7 +142,7 @@ const messages = {
     logging: 'שומר…',
     dailyMax: '118 נקודות זמינות היום',
     streak: 'ימי רצף',
-    streakProgress: 'צריך 60 נקודות תרגילים כדי להמשיך רצף',
+    streakProgress: 'יש לבצע לפחות חזרה אחת בכל תרגיל כדי לשמור על הרצף',
     nextStreak: 'הבונוס הבא ברצף',
     allFour: 'כל ארבעת התרגילים הושלמו',
     ranking: 'נקודות היום',
@@ -143,6 +159,22 @@ const messages = {
     English: 'English',
     Hebrew: 'עברית',
     settings: 'העדפות',
+    rules: 'כללים',
+    newFeatures: 'מה חדש',
+    welcomeTitle: 'ברוכים הבאים ל-PushApp החדשה',
+    welcomeMessage: 'הנה התכונות החדשות וכללי האתגר היומי.',
+    featuresHeading: 'תכונות חדשות',
+    featureScoring: 'צוברים נקודות על חזרות, עם בונוסים על השלמת תרגילים.',
+    featureStreak: 'בונים רצף יומי ומקבלים בונוס על כל שבעה ימים מזכים.',
+    featureCrew: 'עוקבים אחר דירוג הקבוצה והיסטוריית הפעילות.',
+    rulesTitle: 'כללי האתגר',
+    rulesHeading: 'כללים יומיים',
+    rulesCaps: ({ exercises }) => `המכסה היומית: ${exercises} חזרות.`,
+    rulesStreak: 'יש לבצע לפחות חזרה אחת בכל אחד מארבעת התרגילים כדי שהיום ייחשב לרצף.',
+    rulesScoring: 'כל תרגיל שווה עד 25 נקודות, בהתאם למכסה היומית שלו.',
+    rulesBonuses: 'מקבלים 2 נקודות בונוס על הגעה למכסה בכל תרגיל, ועוד 10 על השלמת כל הארבעה. המקסימום: 118 נקודות ביום.',
+    startNow: 'מתחילים',
+    close: 'סגירה',
     loading: 'מכינים את האפליקציה…',
     saveError: 'השמירה נכשלה. נסה שוב.',
     authError: 'לא הצלחנו להתחבר. בדוק את הפרטים ונסה שוב.',
@@ -157,8 +189,9 @@ const messages = {
   },
 }
 
-export function translate(language, key) {
-  return messages[language]?.[key] ?? messages.en[key] ?? key
+export function translate(language, key, params) {
+  const message = messages[language]?.[key] ?? messages.en[key] ?? key
+  return typeof message === 'function' ? message(params) : message
 }
 
 export function exerciseLabel(language, exerciseId) {

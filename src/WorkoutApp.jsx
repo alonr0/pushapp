@@ -19,6 +19,7 @@ import {
 const LANGUAGE_KEY = 'pushapp_language'
 const THEME_KEY = 'pushapp_theme'
 const ACTIVE_GROUP_KEY = 'pushapp_active_group'
+const WELCOME_KEY_PREFIX = 'pushapp_welcome_seen:'
 
 function readPreference(key, fallback) {
   try {
@@ -566,8 +567,56 @@ function AppNav({ tab, setTab, t }) {
   )
 }
 
+function RulesDialog({ mode, onClose, t, language }) {
+  const dialogRef = useRef(null)
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (mode && dialog && !dialog.open) dialog.showModal()
+    if (!mode && dialog?.open) dialog.close()
+  }, [mode])
+
+  if (!mode) return null
+
+  return (
+    <dialog className="rules-dialog" ref={dialogRef} onClose={onClose} aria-labelledby="rules-title">
+      <div className="rules-dialog-content">
+        <header className="rules-dialog-header">
+          <div>
+            <p className="eyebrow">{mode === 'welcome' ? t('newFeatures') : t('rules')}</p>
+            <h2 id="rules-title">{mode === 'welcome' ? t('welcomeTitle') : t('rulesTitle')}</h2>
+          </div>
+        </header>
+        {mode === 'welcome' && <p className="rules-intro">{t('welcomeMessage')}</p>}
+        <section className="rules-section">
+          <h3>{t('featuresHeading')}</h3>
+          <ul>
+            <li>{t('featureScoring')}</li>
+            <li>{t('featureStreak')}</li>
+            <li>{t('featureCrew')}</li>
+          </ul>
+        </section>
+        <section className="rules-section">
+          <h3>{t('rulesHeading')}</h3>
+          <ul>
+            <li>{t('rulesCaps', { exercises: EXERCISES.map(({ id, limit }) => `${exerciseLabel(language, id)} ${limit}`).join(', ') })}</li>
+            <li>{t('rulesStreak')}</li>
+            <li>{t('rulesScoring')}</li>
+            <li>{t('rulesBonuses')}</li>
+          </ul>
+        </section>
+        <div className="rep-dialog-actions">
+          <button className="primary-button" type="button" onClick={() => dialogRef.current?.close()}>
+            {mode === 'welcome' ? t('startNow') : t('close')}
+          </button>
+        </div>
+      </div>
+    </dialog>
+  )
+}
+
 export default function WorkoutApp() {
-  const [language, setLanguage] = useState(() => readPreference(LANGUAGE_KEY, 'en'))
+  const [language, setLanguage] = useState(() => readPreference(LANGUAGE_KEY, 'he'))
   const [theme, setTheme] = useState(() => readPreference(THEME_KEY, 'light'))
   const [session, setSession] = useState(null)
   const [passwordRecovery, setPasswordRecovery] = useState(false)
@@ -579,10 +628,11 @@ export default function WorkoutApp() {
   const [loadedGroupId, setLoadedGroupId] = useState('')
   const [dataError, setDataError] = useState('')
   const [tab, setTab] = useState('workout')
+  const [rulesDialog, setRulesDialog] = useState(null)
   const [busyExercise, setBusyExercise] = useState('')
   const [israelToday, setIsraelToday] = useState(() => getIsraelDate())
 
-  const t = (key) => translate(language, key)
+  const t = (key, params) => translate(language, key, params)
   const profiles = profileState.userId === session?.user?.id ? profileState.profiles : []
   const profileLoading = Boolean(session?.user?.id && profileState.userId !== session.user.id)
   const profile = profiles.find((item) => item.group_id === activeGroupId) || profiles[0] || null
@@ -682,6 +732,7 @@ export default function WorkoutApp() {
   }
 
   const handleJoined = async (groupId) => {
+    const isFirstCrew = profiles.length === 0
     const nextProfiles = await listWorkoutProfiles(session.user.id)
     setProfileState({ userId: session.user.id, profiles: nextProfiles })
     setGroupJoinOpen(false)
@@ -695,6 +746,21 @@ export default function WorkoutApp() {
     }
     await syncOneSignalGroupTag(groupId)
     void promptOneSignalNotifications()
+    if (
+      isFirstCrew &&
+      readPreference(`${WELCOME_KEY_PREFIX}${session.user.id}`, '') !== '1'
+    ) setRulesDialog('welcome')
+  }
+
+  const closeRulesDialog = () => {
+    if (rulesDialog === 'welcome' && session?.user?.id) {
+      try {
+        localStorage.setItem(`${WELCOME_KEY_PREFIX}${session.user.id}`, '1')
+      } catch {
+        // The welcome can still be dismissed for this session.
+      }
+    }
+    setRulesDialog(null)
   }
 
   const handleLeaveGroup = async (groupId) => {
@@ -889,7 +955,10 @@ export default function WorkoutApp() {
           <h1>{tab === 'workout' ? t('today') : tab === 'standings' ? t('standings') : t('history')}</h1>
           <p className="welcome-line">{profile.display_name}</p>
         </div>
-        <button type="button" className="quiet-button signout-button" onClick={signOut}>{t('signOut')}</button>
+        <div className="page-heading-actions">
+          <button type="button" className="quiet-button" onClick={() => setRulesDialog('rules')}>{t('rules')}</button>
+          <button type="button" className="quiet-button signout-button" onClick={signOut}>{t('signOut')}</button>
+        </div>
       </header>
 
       <div className="crew-toolbar">
@@ -1022,6 +1091,7 @@ export default function WorkoutApp() {
       </main>
 
       <AppNav tab={tab} setTab={setTab} t={t} />
+      <RulesDialog mode={rulesDialog} onClose={closeRulesDialog} t={t} language={language} />
     </div>
   )
 }

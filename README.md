@@ -45,6 +45,8 @@ VITE_ONESIGNAL_APP_ID=your-onesignal-app-id
 
 Never put a Supabase secret or service-role key in a browser-exposed variable. The API endpoint uses server-only `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `ONESIGNAL_APP_ID`, and `ONESIGNAL_REST_API_KEY` environment variables when push notifications are enabled.
 
+After a workout log is saved, subscribed members of that crew receive a push notification with the member's name, exercise, and reps. Notifications are localized for English and Hebrew devices.
+
 ## Supabase setup
 
 Apply all files in `supabase/migrations/` in timestamp order. The initial migration remains the legacy baseline; later migrations add the active score model and forward fixes while preserving legacy tables and rows. Active scores start at zero. The database uses `Asia/Jerusalem` for activity dates and enforces caps, scoring, membership authorization, and RLS.

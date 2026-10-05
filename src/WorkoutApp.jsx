@@ -865,7 +865,6 @@ export default function WorkoutApp() {
     setBusyExercise(exerciseId)
     try {
       await logWorkoutReps(profile.group_id, exerciseId, reps)
-      await refreshGroup(profile.group_id)
       try {
         const { data: { session: currentSession }, error: sessionError } = await supabase.auth.getSession()
         if (sessionError) throw sessionError
@@ -880,7 +879,6 @@ export default function WorkoutApp() {
               username: profile.display_name,
               repsCount: reps,
               exerciseId,
-              language,
               groupName: profile.group_id,
               currentGroupId: profile.group_id,
             }),
@@ -890,6 +888,7 @@ export default function WorkoutApp() {
       } catch (pushError) {
         console.warn('Push notification request failed:', pushError)
       }
+      await refreshGroup(profile.group_id)
     } finally {
       setBusyExercise('')
     }

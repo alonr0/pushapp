@@ -22,7 +22,6 @@ export default async function handler(request, response) {
     const username = String(body.username || '').trim()
     const repsCount = Number(body.repsCount)
     const exerciseId = String(body.exerciseId || 'pushups')
-    const language = body.language === 'he' ? 'he' : 'en'
     const exerciseLimits = { pushups: 100, pullups: 50, crunches: 150, squats: 150 }
     const exerciseName = {
       en: { pushups: 'push-ups', pullups: 'pull-ups', crunches: 'crunches', squats: 'squats' },
@@ -79,11 +78,10 @@ export default async function handler(request, response) {
       body: JSON.stringify({
         app_id: appId,
         target_channel: 'push',
-        headings: { en: 'PushApp Alert! 🔥' },
+        headings: { en: 'Crew activity', he: 'פעילות בקבוצה' },
         contents: {
-          [language]: language === 'he'
-            ? `${membership.display_name} הוסיף/ה ${repsCount} ${exerciseName.he[exerciseId]} בקבוצה ${groupName}`
-            : `${membership.display_name} logged ${repsCount} ${exerciseName.en[exerciseId]} in ${groupName}`,
+          en: `${membership.display_name} logged ${repsCount} reps of ${exerciseName.en[exerciseId]} in ${groupName}`,
+          he: `${membership.display_name} ביצע/ה ${repsCount} חזרות של ${exerciseName.he[exerciseId]} בקבוצה ${groupName}`,
         },
         filters: [{ field: 'tag', key: 'groupId', relation: '=', value: currentGroupId }],
       }),

@@ -8,14 +8,7 @@
     "build": "vite build",
     "lint": "eslint .",
     "test": "node --test src/workoutScoring.test.js",
-    "preview": "vite preview",
-    "backfill:group": "vite-node scripts/backfill-group.mjs",
-    "retro:day": "vite-node scripts/retro-day.mjs",
-    "enrich:history": "vite-node scripts/enrich-history-goals.mjs",
-    "sync:day": "vite-node scripts/sync-day.mjs",
-    "fix:total": "vite-node scripts/fix-total-delta.mjs",
-    "check:totals": "vite-node scripts/check-totals.mjs",
-    "recalc:podiums": "vite-node scripts/recalc-podiums.mjs"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.1",

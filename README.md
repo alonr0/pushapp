@@ -82,5 +82,3 @@ New accounts join a crew with a crew code and display name. Joining creates an a
 - `npm run preview` — preview the bundle
 - `npm run lint` — lint the workspace
 - `npm test` — verify scoring and Israel-time boundary rules
-
-The existing maintenance scripts target the legacy push-up data model. They are not used by the active scoring flow.
